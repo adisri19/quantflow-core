@@ -1,0 +1,36 @@
+# VitePress
+.vitepress/dist
+.vitepress/cache
+
+# Dependencies
+node_modules
+yarn.lock
+
+# Build artifacts
+*.log
+*.tgz
+
+# Editor
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Development
+.cache
+.parcel-cache
+
+# Project specific
+PRPs/
+.claude/
+CLAUDE.md
+PR_MESSAGE.md
