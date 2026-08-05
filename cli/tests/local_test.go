@@ -1,0 +1,1410 @@
+package internal
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"quantflow/cmd"
+	"quantflow/internal/local"
+)
+
+// ---- ResolveFriendlyName ----
+
+func TestResolveFriendlyName_ValidFriendlyNames(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"api", "quantflow-api"},
+		{"frontend", "quantflow-frontend"},
+		{"docs", "quantflow-docs"},
+		{"postgres", "postgres"},
+		{"mongo", "mongo"},
+		{"nats", "nats"},
+		{"minio", "minio"},
+		{"runner", "bot-runner"},
+		{"scheduler", "bot-scheduler"},
+		{"query", "query-server"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result, err := local.ResolveFriendlyName(tt.input)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestResolveFriendlyName_ComposeServiceNames(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"quantflow-api", "quantflow-api"},
+		{"quantflow-frontend", "quantflow-frontend"},
+		{"quantflow-docs", "quantflow-docs"},
+		{"bot-runner", "bot-runner"},
+		{"bot-scheduler", "bot-scheduler"},
+		{"query-server", "query-server"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result, err := local.ResolveFriendlyName(tt.input)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestResolveFriendlyName_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"API", "quantflow-api"},
+		{"Frontend", "quantflow-frontend"},
+		{"POSTGRES", "postgres"},
+		{"  api  ", "quantflow-api"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result, err := local.ResolveFriendlyName(tt.input)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestResolveFriendlyName_InvalidNames(t *testing.T) {
+	invalidNames := []string{
+		"unknown",
+		"redis",
+		"",
+		"quantflow-nonexistent",
+		"database",
+	}
+
+	for _, name := range invalidNames {
+		t.Run(name, func(t *testing.T) {
+			_, err := local.ResolveFriendlyName(name)
+			if err == nil {
+				t.Fatalf("Expected error for %q, got nil", name)
+			}
+			if !strings.Contains(err.Error(), "unknown service") {
+				t.Errorf("Expected 'unknown service' in error, got: %s", err.Error())
+			}
+			if !strings.Contains(err.Error(), "available:") {
+				t.Errorf("Expected 'available:' in error message, got: %s", err.Error())
+			}
+		})
+	}
+}
+
+// ---- ServiceRegistry ----
+
+func TestServiceRegistry_AllCategoriesPresent(t *testing.T) {
+	categories := map[string]bool{}
+	for _, svc := range local.ServiceRegistry {
+		categories[svc.Category] = true
+	}
+
+	expectedCategories := []string{"app", "infra", "runtime"}
+	for _, cat := range expectedCategories {
+		if !categories[cat] {
+			t.Errorf("Expected category %q to be present in ServiceRegistry", cat)
+		}
+	}
+}
+
+func TestServiceRegistry_AllServicesHaveRequiredFields(t *testing.T) {
+	for name, svc := range local.ServiceRegistry {
+		t.Run(name, func(t *testing.T) {
+			if svc.ComposeService == "" {
+				t.Error("ComposeService is empty")
+			}
+			if svc.FriendlyName == "" {
+				t.Error("FriendlyName is empty")
+			}
+			// Port and URL are optional for internal services (e.g., GC)
+			// that don't expose a user-facing endpoint
+			if svc.Category == "" {
+				t.Error("Category is empty")
+			}
+		})
+	}
+}
+
+func TestServiceRegistry_NoDuplicateComposeSvcNames(t *testing.T) {
+	seen := map[string]string{}
+	for name, svc := range local.ServiceRegistry {
+		if prev, ok := seen[svc.ComposeService]; ok {
+			t.Errorf("Duplicate ComposeService %q found in %q and %q", svc.ComposeService, prev, name)
+		}
+		seen[svc.ComposeService] = name
+	}
+}
+
+func TestServiceRegistry_NoDuplicatePorts(t *testing.T) {
+	seen := map[int]string{}
+	for name, svc := range local.ServiceRegistry {
+		if prev, ok := seen[svc.Port]; ok {
+			t.Errorf("Duplicate port %d found in %q and %q", svc.Port, prev, name)
+		}
+		seen[svc.Port] = name
+	}
+}
+
+// ---- ComposeDir ----
+
+func TestComposeDir_ReturnsExpectedPath(t *testing.T) {
+	dir, err := local.ComposeDir()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("Cannot get home dir: %v", err)
+	}
+
+	expected := filepath.Join(home, ".quantflow", "compose")
+	if dir != expected {
+		t.Errorf("Expected %q, got %q", expected, dir)
+	}
+}
+
+// ---- GenerateEnvFile ----
+
+func TestGenerateEnvFile_CreatesFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	err = local.GenerateEnvFile(tmpDir)
+	if err != nil {
+		t.Fatalf("GenerateEnvFile failed: %v", err)
+	}
+
+	envPath := filepath.Join(tmpDir, ".env")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env file: %v", err)
+	}
+
+	content := string(data)
+
+	// Verify essential key=value pairs exist
+	expectedKeys := []string{
+		"POSTGRES_DB=",
+		"POSTGRES_USER=",
+		"POSTGRES_PASSWORD=",
+		"MONGO_INITDB_ROOT_USERNAME=",
+		"MONGO_INITDB_ROOT_PASSWORD=",
+		"MINIO_ROOT_USER=",
+		"MINIO_ROOT_PASSWORD=",
+		"JWT_SECRET=",
+		"QUANTFLOW_ADMIN_EMAIL=",
+		"QUANTFLOW_ADMIN_PASSWORD=",
+		"API_PORT=",
+		"FRONTEND_PORT=",
+		"DOCS_PORT=",
+		"DOCKER_GID=",
+	}
+
+	for _, key := range expectedKeys {
+		if !strings.Contains(content, key) {
+			t.Errorf("Expected .env to contain %q", key)
+		}
+	}
+}
+
+func TestGenerateEnvFile_PreservesExistingAndAddsDockerGID(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Write a custom .env file first
+	envPath := filepath.Join(tmpDir, ".env")
+	customContent := "CUSTOM_KEY=custom_value\n"
+	if err := os.WriteFile(envPath, []byte(customContent), 0600); err != nil {
+		t.Fatalf("Failed to write custom .env: %v", err)
+	}
+
+	err = local.GenerateEnvFile(tmpDir)
+	if err != nil {
+		t.Fatalf("GenerateEnvFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env file: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, customContent) {
+		t.Errorf("Expected original content to be preserved, got: %s", content)
+	}
+	if !strings.Contains(content, "DOCKER_GID=") {
+		t.Errorf("Expected existing .env to be updated with DOCKER_GID, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=") {
+		t.Errorf("Expected existing .env to be updated with QUANTFLOW_ADMIN_EMAIL, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_PASSWORD=") {
+		t.Errorf("Expected existing .env to be updated with QUANTFLOW_ADMIN_PASSWORD, got: %s", content)
+	}
+}
+
+func TestGenerateEnvFile_IgnoresSimilarDockerGIDKeys(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	customContent := "MY_DOCKER_GID=1234\n"
+	if err := os.WriteFile(envPath, []byte(customContent), 0600); err != nil {
+		t.Fatalf("Failed to write custom .env: %v", err)
+	}
+
+	if err := local.GenerateEnvFile(tmpDir); err != nil {
+		t.Fatalf("GenerateEnvFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env file: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, customContent) {
+		t.Errorf("Expected original content to be preserved, got: %s", content)
+	}
+	if !strings.Contains(content, "\nDOCKER_GID=") {
+		t.Errorf("Expected exact DOCKER_GID key to be added, got: %s", content)
+	}
+}
+
+func TestGenerateEnvFile_DoesNotDuplicateExistingDockerGID(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	customContent := "CUSTOM_KEY=custom_value\nDOCKER_GID=1234\n"
+	if err := os.WriteFile(envPath, []byte(customContent), 0600); err != nil {
+		t.Fatalf("Failed to write custom .env: %v", err)
+	}
+
+	if err := local.GenerateEnvFile(tmpDir); err != nil {
+		t.Fatalf("GenerateEnvFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env file: %v", err)
+	}
+
+	content := string(data)
+	if strings.Count(content, "DOCKER_GID=") != 1 {
+		t.Errorf("Expected existing DOCKER_GID not to be duplicated, got: %s", content)
+	}
+	if !strings.Contains(content, customContent) {
+		t.Errorf("Expected existing content to be preserved, got: %s", content)
+	}
+}
+
+func TestSetAdminEmail_UpdatesExistingKey(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminEmail(tmpDir, "admin@example.com"); err != nil {
+		t.Fatalf("SetAdminEmail failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=admin@example.com") {
+		t.Errorf("Expected admin email to be updated, got: %s", content)
+	}
+	if strings.Count(content, "QUANTFLOW_ADMIN_EMAIL=") != 1 {
+		t.Errorf("Expected admin email key to be idempotent, got: %s", content)
+	}
+}
+
+func TestSetAdminEmail_PreservesInlineComment(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com # selected admin\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminEmail(tmpDir, "admin@example.com"); err != nil {
+		t.Fatalf("SetAdminEmail failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=admin@example.com # selected admin") {
+		t.Errorf("Expected inline comment to be preserved, got: %s", content)
+	}
+}
+
+func TestSetAdminEmail_AppendsMissingKey(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("CUSTOM_KEY=value\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminEmail(tmpDir, "admin@example.com"); err != nil {
+		t.Fatalf("SetAdminEmail failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "CUSTOM_KEY=value") {
+		t.Errorf("Expected existing content to be preserved, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=admin@example.com") {
+		t.Errorf("Expected admin email to be appended, got: %s", content)
+	}
+}
+
+func TestSetAdminEmail_RejectsUnsafeEmail(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	unsafeEmails := []string{
+		"admin@example.com\nJWT_SECRET=bad",
+		"admin#tag@example.com",
+	}
+	for _, email := range unsafeEmails {
+		if err := local.SetAdminEmail(tmpDir, email); err == nil {
+			t.Fatalf("Expected unsafe email %q to be rejected", email)
+		}
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "JWT_SECRET=bad") {
+		t.Errorf("Expected unsafe value not to be written, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=old@example.com") {
+		t.Errorf("Expected original email to be preserved, got: %s", content)
+	}
+}
+
+func TestSetAdminEmail_MissingEnvIsActionable(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	err = local.SetAdminEmail(tmpDir, "admin@example.com")
+	if err == nil {
+		t.Fatal("Expected missing .env to return an error")
+	}
+	if !strings.Contains(err.Error(), "quantflow local init") {
+		t.Fatalf("Expected actionable init guidance, got: %v", err)
+	}
+}
+
+func TestSetAdminCredentials_UpdatesEmailAndPasswordIdempotently(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com\nQUANTFLOW_ADMIN_PASSWORD=oldsecret\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminCredentials(tmpDir, "admin@example.com", "newsecret"); err != nil {
+		t.Fatalf("SetAdminCredentials failed: %v", err)
+	}
+	if err := local.SetAdminCredentials(tmpDir, "admin@example.com", "newsecret"); err != nil {
+		t.Fatalf("SetAdminCredentials failed on second run: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=admin@example.com") {
+		t.Errorf("Expected admin email to be updated, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_PASSWORD=newsecret") {
+		t.Errorf("Expected admin password to be updated, got: %s", content)
+	}
+	if strings.Count(content, "QUANTFLOW_ADMIN_EMAIL=") != 1 {
+		t.Errorf("Expected admin email key to be idempotent, got: %s", content)
+	}
+	if strings.Count(content, "QUANTFLOW_ADMIN_PASSWORD=") != 1 {
+		t.Errorf("Expected admin password key to be idempotent, got: %s", content)
+	}
+}
+
+func TestSetAdminCredentials_PreservesInlineComments(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	content := "QUANTFLOW_ADMIN_EMAIL=old@example.com # selected admin\nQUANTFLOW_ADMIN_PASSWORD=oldsecret # temporary recovery secret\n"
+	if err := os.WriteFile(envPath, []byte(content), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminCredentials(tmpDir, "admin@example.com", "newsecret"); err != nil {
+		t.Fatalf("SetAdminCredentials failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	updated := string(data)
+	if !strings.Contains(updated, "QUANTFLOW_ADMIN_EMAIL=admin@example.com # selected admin") {
+		t.Errorf("Expected email inline comment to be preserved, got: %s", updated)
+	}
+	if !strings.Contains(updated, "QUANTFLOW_ADMIN_PASSWORD=newsecret # temporary recovery secret") {
+		t.Errorf("Expected password inline comment to be preserved, got: %s", updated)
+	}
+}
+
+func TestSetAdminCredentials_AppendsMissingPassword(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminCredentials(tmpDir, "admin@example.com", "newsecret"); err != nil {
+		t.Fatalf("SetAdminCredentials failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=admin@example.com") {
+		t.Errorf("Expected admin email to be updated, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_PASSWORD=newsecret") {
+		t.Errorf("Expected admin password to be appended, got: %s", content)
+	}
+}
+
+func TestSetAdminCredentials_RejectsInvalidPassword(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com\nQUANTFLOW_ADMIN_PASSWORD=oldsecret\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminCredentials(tmpDir, "admin@example.com", "bad\nJWT_SECRET=oops"); err == nil {
+		t.Fatal("Expected invalid password to be rejected")
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "JWT_SECRET=oops") {
+		t.Errorf("Expected unsafe password not to be written, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_PASSWORD=oldsecret") {
+		t.Errorf("Expected original password to be preserved, got: %s", content)
+	}
+}
+
+func TestSetAdminCredentials_AllowsPolicyValidationToHappenInApi(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=old@example.com\nQUANTFLOW_ADMIN_PASSWORD=oldsecret\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminCredentials(tmpDir, "admin@example.com", "short"); err != nil {
+		t.Fatalf("Expected short single-line password to be written for API validation, got: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_PASSWORD=short") {
+		t.Errorf("Expected password to be written for API validation, got: %s", content)
+	}
+}
+
+func TestSetAdminPassword_UpdatesPasswordOnly(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=admin@example.com\nQUANTFLOW_ADMIN_PASSWORD=oldsecret\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	if err := local.SetAdminPassword(tmpDir, "newsecret"); err != nil {
+		t.Fatalf("SetAdminPassword failed: %v", err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("Failed to read .env: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_EMAIL=admin@example.com") {
+		t.Errorf("Expected admin email to be preserved, got: %s", content)
+	}
+	if !strings.Contains(content, "QUANTFLOW_ADMIN_PASSWORD=newsecret") {
+		t.Errorf("Expected admin password to be updated, got: %s", content)
+	}
+}
+
+func TestAdminCredentialsConfigured(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=admin@example.com\nQUANTFLOW_ADMIN_PASSWORD=secret123\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	configured, err := local.AdminCredentialsConfigured(tmpDir)
+	if err != nil {
+		t.Fatalf("AdminCredentialsConfigured failed: %v", err)
+	}
+	if !configured {
+		t.Fatal("Expected admin credentials to be configured")
+	}
+}
+
+func TestAdminCredentialsConfigured_EmptyPassword(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("QUANTFLOW_ADMIN_EMAIL=admin@example.com\nQUANTFLOW_ADMIN_PASSWORD=\n"), 0600); err != nil {
+		t.Fatalf("Failed to write .env: %v", err)
+	}
+
+	configured, err := local.AdminCredentialsConfigured(tmpDir)
+	if err != nil {
+		t.Fatalf("AdminCredentialsConfigured failed: %v", err)
+	}
+	if configured {
+		t.Fatal("Expected admin credentials to be incomplete")
+	}
+}
+
+func TestGenerateEnvFile_CorrectPermissions(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "env-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	err = local.GenerateEnvFile(tmpDir)
+	if err != nil {
+		t.Fatalf("GenerateEnvFile failed: %v", err)
+	}
+
+	envPath := filepath.Join(tmpDir, ".env")
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("Failed to stat .env file: %v", err)
+	}
+
+	// File should be 0600 (owner read/write only)
+	perm := info.Mode().Perm()
+	if perm != 0600 {
+		t.Errorf("Expected permissions 0600, got %o", perm)
+	}
+}
+
+// ---- ValidateRepoPath ----
+
+func TestValidateRepoPath_ValidRepo(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "repo-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create the required directories
+	requiredDirs := []string{"api", "frontend", "runtime", "docker"}
+	for _, dir := range requiredDirs {
+		if err := os.Mkdir(filepath.Join(tmpDir, dir), 0755); err != nil {
+			t.Fatalf("Failed to create dir %s: %v", dir, err)
+		}
+	}
+
+	err = local.ValidateRepoPath(tmpDir)
+	if err != nil {
+		t.Errorf("Expected valid repo path, got error: %v", err)
+	}
+}
+
+func TestValidateRepoPath_MissingDirs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "repo-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Only create some of the required directories
+	os.Mkdir(filepath.Join(tmpDir, "api"), 0755)
+
+	err = local.ValidateRepoPath(tmpDir)
+	if err == nil {
+		t.Fatal("Expected error for missing directories, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a valid quantflow repository") {
+		t.Errorf("Expected 'not a valid quantflow repository' in error, got: %s", err.Error())
+	}
+	// Should mention at least one missing dir
+	if !strings.Contains(err.Error(), "missing:") {
+		t.Errorf("Expected 'missing:' in error, got: %s", err.Error())
+	}
+}
+
+func TestValidateRepoPath_NonExistentPath(t *testing.T) {
+	err := local.ValidateRepoPath("/nonexistent/path/that/does/not/exist")
+	if err == nil {
+		t.Fatal("Expected error for non-existent path, got nil")
+	}
+	if !strings.Contains(err.Error(), "path does not exist") {
+		t.Errorf("Expected 'path does not exist' in error, got: %s", err.Error())
+	}
+}
+
+func TestValidateRepoPath_FileNotDir(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "repo-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	err = local.ValidateRepoPath(tmpFile.Name())
+	if err == nil {
+		t.Fatal("Expected error for file path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("Expected 'not a directory' in error, got: %s", err.Error())
+	}
+}
+
+// ---- LocalState JSON round-trip ----
+
+func TestLocalState_JSONRoundTrip(t *testing.T) {
+	original := &local.LocalState{
+		RepoPath: "/home/user/quantflow",
+		Prebuilt: false,
+		InitAt:   time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC),
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var loaded local.LocalState
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if loaded.RepoPath != original.RepoPath {
+		t.Errorf("RepoPath mismatch: expected %q, got %q", original.RepoPath, loaded.RepoPath)
+	}
+	if loaded.Prebuilt != original.Prebuilt {
+		t.Errorf("Prebuilt mismatch: expected %v, got %v", original.Prebuilt, loaded.Prebuilt)
+	}
+	if !loaded.InitAt.Equal(original.InitAt) {
+		t.Errorf("InitAt mismatch: expected %v, got %v", original.InitAt, loaded.InitAt)
+	}
+}
+
+func TestLocalState_JSONFields(t *testing.T) {
+	state := &local.LocalState{
+		RepoPath: "/test/path",
+		Prebuilt: true,
+		InitAt:   time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	content := string(data)
+
+	// Verify JSON field names match the struct tags
+	if !strings.Contains(content, `"repo_path"`) {
+		t.Error("Expected JSON field 'repo_path'")
+	}
+	if !strings.Contains(content, `"prebuilt"`) {
+		t.Error("Expected JSON field 'prebuilt'")
+	}
+	if !strings.Contains(content, `"init_at"`) {
+		t.Error("Expected JSON field 'init_at'")
+	}
+}
+
+// ---- ComposeRunner ----
+
+func TestComposeRunner_BaseArgs(t *testing.T) {
+	runner := &local.ComposeRunner{
+		ComposeDir: "/tmp/test-compose",
+		State:      &local.LocalState{RepoPath: "/test"},
+	}
+
+	args := runner.BaseArgs()
+
+	expected := []string{
+		"compose",
+		"-f", "/tmp/test-compose/docker-compose.yml",
+		"-p", "quantflow",
+	}
+
+	if len(args) != len(expected) {
+		t.Fatalf("Expected %d args, got %d: %v", len(expected), len(args), args)
+	}
+
+	for i, arg := range expected {
+		if args[i] != arg {
+			t.Errorf("Arg[%d]: expected %q, got %q", i, arg, args[i])
+		}
+	}
+}
+
+func TestComposeRunner_DevArgs(t *testing.T) {
+	runner := &local.ComposeRunner{
+		ComposeDir: "/tmp/test-compose",
+		State:      &local.LocalState{RepoPath: "/test"},
+	}
+
+	args := runner.DevArgs()
+
+	expected := []string{
+		"compose",
+		"-f", "/tmp/test-compose/docker-compose.yml",
+		"-f", "/tmp/test-compose/docker-compose.dev.yml",
+		"-p", "quantflow",
+	}
+
+	if len(args) != len(expected) {
+		t.Fatalf("Expected %d args, got %d: %v", len(expected), len(args), args)
+	}
+
+	for i, arg := range expected {
+		if args[i] != arg {
+			t.Errorf("Arg[%d]: expected %q, got %q", i, arg, args[i])
+		}
+	}
+}
+
+func TestComposeRunner_DevArgsIncludesBaseFile(t *testing.T) {
+	runner := &local.ComposeRunner{
+		ComposeDir: "/some/path",
+		State:      &local.LocalState{},
+	}
+
+	devArgs := runner.DevArgs()
+	baseArgs := runner.BaseArgs()
+
+	// Dev args should include the base compose file plus the dev overlay
+	if len(devArgs) != len(baseArgs)+2 {
+		t.Errorf("Dev args should have 2 more entries than base args (got base=%d, dev=%d)", len(baseArgs), len(devArgs))
+	}
+
+	// First -f should be the same in both
+	if devArgs[1] != baseArgs[1] || devArgs[2] != baseArgs[2] {
+		t.Error("Dev args should start with the same -f flag as base args")
+	}
+}
+
+// ---- Local Command Structure ----
+
+func TestLocalCommand_HasSubcommands(t *testing.T) {
+	localCmd := cmd.NewLocalCmd()
+
+	expectedSubcommands := []string{
+		"init",
+		"start",
+		"stop",
+		"restart",
+		"status",
+		"logs",
+		"dev",
+		"uninstall",
+	}
+
+	subcommands := localCmd.Commands()
+	subcommandNames := make(map[string]bool)
+	for _, sub := range subcommands {
+		subcommandNames[sub.Name()] = true
+	}
+
+	for _, expected := range expectedSubcommands {
+		if !subcommandNames[expected] {
+			t.Errorf("Expected subcommand %q not found in local command", expected)
+		}
+	}
+}
+
+func TestLocalCommand_Usage(t *testing.T) {
+	localCmd := cmd.NewLocalCmd()
+
+	if localCmd.Use != "local" {
+		t.Errorf("Expected usage 'local', got %q", localCmd.Use)
+	}
+
+	if localCmd.Short == "" {
+		t.Error("Expected non-empty short description")
+	}
+}
+
+func TestLocalInitCommand_Flags(t *testing.T) {
+	localCmd := cmd.NewLocalCmd()
+
+	for _, sub := range localCmd.Commands() {
+		if sub.Name() == "init" {
+			sourceFlag := sub.Flag("source")
+			if sourceFlag == nil {
+				t.Error("Expected init command to have 'source' flag")
+			} else if sourceFlag.DefValue != "" {
+				t.Errorf("Expected source default empty string, got %q", sourceFlag.DefValue)
+			}
+
+			return
+		}
+	}
+	t.Error("init subcommand not found")
+}
+
+func TestLocalLogsCommand_Flags(t *testing.T) {
+	localCmd := cmd.NewLocalCmd()
+
+	for _, sub := range localCmd.Commands() {
+		if sub.Name() == "logs" {
+			followFlag := sub.Flag("follow")
+			if followFlag == nil {
+				t.Error("Expected logs command to have 'follow' flag")
+			} else {
+				if followFlag.Shorthand != "f" {
+					t.Errorf("Expected follow flag shorthand 'f', got %q", followFlag.Shorthand)
+				}
+			}
+
+			tailFlag := sub.Flag("tail")
+			if tailFlag == nil {
+				t.Error("Expected logs command to have 'tail' flag")
+			}
+
+			return
+		}
+	}
+	t.Error("logs subcommand not found")
+}
+
+func TestLocalUninstallCommand_YesFlag(t *testing.T) {
+	localCmd := cmd.NewLocalCmd()
+
+	for _, sub := range localCmd.Commands() {
+		if sub.Name() == "uninstall" {
+			yesFlag := sub.Flag("yes")
+			if yesFlag == nil {
+				t.Error("Expected uninstall command to have 'yes' flag")
+			} else {
+				if yesFlag.Shorthand != "y" {
+					t.Errorf("Expected yes flag shorthand 'y', got %q", yesFlag.Shorthand)
+				}
+				if yesFlag.DefValue != "false" {
+					t.Errorf("Expected yes flag default 'false', got %q", yesFlag.DefValue)
+				}
+			}
+
+			return
+		}
+	}
+	t.Error("uninstall subcommand not found")
+}
+
+// ---- EnsureInitialized ----
+
+func TestEnsureInitialized_FailsWhenNotInitialized(t *testing.T) {
+	// EnsureInitialized calls LoadState which reads from ~/.quantflow/compose/local-state.json.
+	// If the state file doesn't exist, it should return an error.
+	// We can test this by temporarily pointing HOME to a temp dir.
+	tmpDir, err := os.MkdirTemp("", "ensure-init-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Save and restore HOME
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	_, err = local.EnsureInitialized()
+	if err == nil {
+		t.Fatal("Expected error when not initialized, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' in error, got: %s", err.Error())
+	}
+}
+
+// ---- SaveState / LoadState round-trip ----
+
+func TestSaveLoadState_RoundTrip(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "state-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Point HOME to temp dir so state files go there
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Create the compose directory
+	composeDir := filepath.Join(tmpDir, ".quantflow", "compose")
+	if err := os.MkdirAll(composeDir, 0755); err != nil {
+		t.Fatalf("Failed to create compose dir: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	original := &local.LocalState{
+		RepoPath: "/home/testuser/quantflow",
+		Prebuilt: false,
+		InitAt:   now,
+	}
+
+	if err := local.SaveState(original); err != nil {
+		t.Fatalf("SaveState failed: %v", err)
+	}
+
+	// Verify file was created
+	stateFile := filepath.Join(composeDir, "local-state.json")
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		t.Fatal("State file was not created")
+	}
+
+	// Verify file permissions
+	info, err := os.Stat(stateFile)
+	if err != nil {
+		t.Fatalf("Failed to stat state file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("Expected permissions 0600, got %o", info.Mode().Perm())
+	}
+
+	// Load it back
+	loaded, err := local.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+
+	if loaded.RepoPath != original.RepoPath {
+		t.Errorf("RepoPath: expected %q, got %q", original.RepoPath, loaded.RepoPath)
+	}
+	if loaded.Prebuilt != original.Prebuilt {
+		t.Errorf("Prebuilt: expected %v, got %v", original.Prebuilt, loaded.Prebuilt)
+	}
+	// Compare truncated to second since JSON marshaling may lose sub-second precision
+	if !loaded.InitAt.Truncate(time.Second).Equal(original.InitAt.Truncate(time.Second)) {
+		t.Errorf("InitAt: expected %v, got %v", original.InitAt, loaded.InitAt)
+	}
+}
+
+func TestEnsureInitialized_SucceedsWhenInitialized(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ensure-init-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Create compose dir and state file
+	composeDir := filepath.Join(tmpDir, ".quantflow", "compose")
+	if err := os.MkdirAll(composeDir, 0755); err != nil {
+		t.Fatalf("Failed to create compose dir: %v", err)
+	}
+
+	state := &local.LocalState{
+		RepoPath: "/test/path",
+		Prebuilt: false,
+		InitAt:   time.Now(),
+	}
+
+	if err := local.SaveState(state); err != nil {
+		t.Fatalf("SaveState failed: %v", err)
+	}
+
+	loaded, err := local.EnsureInitialized()
+	if err != nil {
+		t.Fatalf("EnsureInitialized should succeed, got error: %v", err)
+	}
+	if loaded.RepoPath != state.RepoPath {
+		t.Errorf("RepoPath: expected %q, got %q", state.RepoPath, loaded.RepoPath)
+	}
+}
+
+// ---- CleanupComposeDir ----
+
+func TestCleanupComposeDir(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cleanup-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Create compose directory with a file
+	composeDir := filepath.Join(tmpDir, ".quantflow", "compose")
+	if err := os.MkdirAll(composeDir, 0755); err != nil {
+		t.Fatalf("Failed to create compose dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(composeDir, "test.txt"), []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	err = local.CleanupComposeDir()
+	if err != nil {
+		t.Fatalf("CleanupComposeDir failed: %v", err)
+	}
+
+	// Verify directory is gone
+	if _, err := os.Stat(composeDir); !os.IsNotExist(err) {
+		t.Error("Expected compose directory to be removed")
+	}
+}
+
+func TestCleanupComposeDir_NoErrorWhenMissing(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cleanup-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Don't create the compose dir - cleanup should not error
+	err = local.CleanupComposeDir()
+	if err != nil {
+		t.Errorf("CleanupComposeDir should not error on missing dir, got: %v", err)
+	}
+}
+
+// ---- Prebuilt mode tests ----
+
+func TestLocalState_PrebuiltMode_JSONRoundTrip(t *testing.T) {
+	original := &local.LocalState{
+		RepoPath: "",
+		Prebuilt: true,
+		InitAt:   time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC),
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var loaded local.LocalState
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if loaded.RepoPath != "" {
+		t.Errorf("RepoPath should be empty, got %q", loaded.RepoPath)
+	}
+	if !loaded.Prebuilt {
+		t.Error("Prebuilt should be true")
+	}
+	if !loaded.InitAt.Equal(original.InitAt) {
+		t.Errorf("InitAt mismatch: expected %v, got %v", original.InitAt, loaded.InitAt)
+	}
+}
+
+func TestExtractComposeFiles_PrebuiltMode(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "prebuilt-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Extract in prebuilt mode
+	if err := local.ExtractComposeFiles("", true); err != nil {
+		t.Fatalf("ExtractComposeFiles failed: %v", err)
+	}
+
+	composeDir := filepath.Join(tmpDir, ".quantflow", "compose")
+
+	// docker-compose.yml should exist and not contain {{REPO_PATH}}
+	composeData, err := os.ReadFile(filepath.Join(composeDir, "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("Failed to read docker-compose.yml: %v", err)
+	}
+	if strings.Contains(string(composeData), "{{REPO_PATH}}") {
+		t.Error("Prebuilt compose file should not contain {{REPO_PATH}} placeholders")
+	}
+
+	// Should contain GHCR image references
+	composeContent := string(composeData)
+	if !strings.Contains(composeContent, "ghcr.io/quantflow-io/quantflow/") {
+		t.Error("Prebuilt compose file should contain GHCR image references")
+	}
+	assertHardenedComposeHealthchecks(t, composeContent)
+	assertDockerSocketGroup(t, composeContent)
+
+	// docker-compose.dev.yml should NOT exist
+	devPath := filepath.Join(composeDir, "docker-compose.dev.yml")
+	if _, err := os.Stat(devPath); !os.IsNotExist(err) {
+		t.Error("Prebuilt mode should not write docker-compose.dev.yml")
+	}
+
+	// State should have Prebuilt=true and empty RepoPath
+	state, err := local.LoadState()
+	if err != nil {
+		t.Fatalf("Failed to load state: %v", err)
+	}
+	if !state.Prebuilt {
+		t.Error("State.Prebuilt should be true")
+	}
+	if state.RepoPath != "" {
+		t.Errorf("State.RepoPath should be empty, got %q", state.RepoPath)
+	}
+}
+
+func TestExtractComposeFiles_SourceMode(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "source-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Create a fake repo path
+	repoPath := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatalf("Failed to create repo dir: %v", err)
+	}
+
+	// Extract in source mode
+	if err := local.ExtractComposeFiles(repoPath, false); err != nil {
+		t.Fatalf("ExtractComposeFiles failed: %v", err)
+	}
+
+	composeDir := filepath.Join(tmpDir, ".quantflow", "compose")
+
+	// docker-compose.yml should exist with {{REPO_PATH}} replaced
+	composeData, err := os.ReadFile(filepath.Join(composeDir, "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("Failed to read docker-compose.yml: %v", err)
+	}
+	if strings.Contains(string(composeData), "{{REPO_PATH}}") {
+		t.Error("Source compose file should not contain {{REPO_PATH}} placeholders")
+	}
+	if !strings.Contains(string(composeData), repoPath) {
+		t.Error("Source compose file should contain the resolved repo path")
+	}
+	assertHardenedComposeHealthchecks(t, string(composeData))
+	assertDockerSocketGroup(t, string(composeData))
+
+	// docker-compose.dev.yml should exist
+	devData, err := os.ReadFile(filepath.Join(composeDir, "docker-compose.dev.yml"))
+	if err != nil {
+		t.Fatalf("Failed to read docker-compose.dev.yml: %v", err)
+	}
+	if strings.Contains(string(devData), "{{REPO_PATH}}") {
+		t.Error("Dev compose file should not contain {{REPO_PATH}} placeholders")
+	}
+
+	// State should have Prebuilt=false and correct RepoPath
+	state, err := local.LoadState()
+	if err != nil {
+		t.Fatalf("Failed to load state: %v", err)
+	}
+	if state.Prebuilt {
+		t.Error("State.Prebuilt should be false")
+	}
+	if state.RepoPath != repoPath {
+		t.Errorf("State.RepoPath: expected %q, got %q", repoPath, state.RepoPath)
+	}
+}
+
+func assertDockerSocketGroup(t *testing.T, composeContent string) {
+	t.Helper()
+
+	if count := strings.Count(composeContent, `- /var/run/docker.sock:/var/run/docker.sock`); count != 3 {
+		t.Errorf("Compose content should mount Docker socket for runner, scheduler, and query server (want 3, got %d)", count)
+	}
+	if count := strings.Count(composeContent, `- "${DOCKER_GID:-0}"`); count != 3 {
+		t.Errorf("Compose content should add Docker socket group for runner, scheduler, and query server (want 3, got %d)", count)
+	}
+}
+
+func assertHardenedComposeHealthchecks(t *testing.T, composeContent string) {
+	t.Helper()
+
+	nodeHealthcheck := `test: ["CMD", "node", "/app/scripts/docker-healthcheck.js"]`
+	if count := strings.Count(composeContent, nodeHealthcheck); count != 2 {
+		t.Errorf("Compose content should contain hardened node healthcheck for API and frontend (want 2, got %d)", count)
+	}
+
+	expected := []string{
+		`- "3002:8080"`,
+		`http://127.0.0.1:8080/health`,
+	}
+
+	for _, want := range expected {
+		if !strings.Contains(composeContent, want) {
+			t.Errorf("Compose content should contain %q", want)
+		}
+	}
+
+	unexpected := []string{
+		`node", "-e"`,
+		`require("http").get`,
+		`http://127.0.0.1:3000/health`,
+		`wget --no-verbose --tries=1 --spider http://0.0.0.0:3000/ || exit 1`,
+		`- "3002:80"`,
+		`http://127.0.0.1/health`,
+	}
+
+	for _, notWant := range unexpected {
+		if strings.Contains(composeContent, notWant) {
+			t.Errorf("Compose content should not contain stale config %q", notWant)
+		}
+	}
+}

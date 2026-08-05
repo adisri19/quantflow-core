@@ -1,0 +1,754 @@
+# quantflow CLI
+
+🚀 **quantflow Custom Bot CLI** - Deploy your trading bots like a boss!
+
+A comprehensive command-line tool for managing trading bots, deploying custom algorithms, and interacting with the quantflow platform ecosystem.
+
+## Installation
+
+### From Source
+```bash
+git clone https://github.com/quantflowplatform/cli.git
+cd cli
+make build
+make install
+```
+
+### From Releases
+Download the latest binary from the [releases page](https://github.com/quantflowplatform/cli/releases).
+
+## Configuration
+
+### API Endpoint Setup
+
+The CLI connects to an API server via named environments. Each environment stores its own URL and API key, so you can switch between local dev and a remote cluster without juggling env vars or clobbering credentials.
+
+**For Docker Compose deployment:**
+```bash
+quantflow env add local --url http://localhost:3000
+```
+
+**For Kubernetes deployment:**
+```bash
+quantflow env add cluster --url http://api.quantflow.local:3000
+```
+
+Switch the active environment with `quantflow env use <name>`, or override a single command with `--env <name>`. See [Environments](#-environment-commands) below.
+
+## Quick Start
+
+1. **Add an environment and authenticate:**
+   ```bash
+   quantflow env add local --url http://localhost:3000
+   # You will be prompted for the API key and it will be validated before saving.
+   ```
+
+2. **Deploy a bot instance:**
+   ```bash
+   # Create a config.json file with your bot configuration
+   echo '{"name": "my-trading-bot", "type": "scheduled/rsi-momentum", "version": "1.0.0"}' > config.json
+   quantflow bot deploy config.json
+   ```
+
+3. **List your deployed bots:**
+   ```bash
+   quantflow bot list
+   ```
+
+4. **Deploy and manage backtests:**
+   ```bash
+   # Deploy a backtest
+   echo '{"name": "my-backtest", "type": "scheduled/rsi-momentum", "version": "1.0.0"}' > backtest-config.json
+   quantflow backtest deploy backtest-config.json
+
+   # List all backtests
+   quantflow backtest list
+   ```
+
+## Commands Reference
+
+### 🔐 Authentication Commands
+Manage your API credentials and authentication status.
+
+```bash
+quantflow auth login          # Set or update API key for the active environment
+quantflow auth status         # Check API key validity
+quantflow auth logout         # Remove saved API key
+```
+
+### 🌐 Environment Commands
+Manage named API environments (local, prod, ...). Each stores its own URL and API key.
+
+```bash
+quantflow env add <name> --url <url> [--api-key <key>]   # key validated before save
+quantflow env use <name>                                  # switch active environment
+quantflow env list                                        # show all; active marked with *
+quantflow env remove <name>                               # delete an environment
+quantflow env current                                     # show active env + URL
+quantflow <any-command> --env <name>                      # one-off override
+```
+
+**Examples:**
+```bash
+# Login with your API key
+quantflow auth login
+# Enter your quantflow API key: your-api-key-here
+
+# Check if your API key is valid
+quantflow auth status
+# ✅ API key is valid (expires: never)
+
+# Logout and remove stored credentials
+quantflow auth logout
+# 👋 Logged out successfully
+```
+
+### 🤖 Bot Instance Management
+Deploy, manage, and monitor your trading bot instances.
+
+#### Deploy Bot Instance
+```bash
+quantflow bot deploy <config.json>
+```
+Deploy a new bot instance using a configuration file. The bot name is automatically extracted from the config file.
+
+**Config file format:**
+```json
+{
+  "name": "my-trading-bot",
+  "type": "scheduled/rsi-momentum",
+  "version": "1.0.0",
+  "schedule": "0 0 * * *",
+  "risk_level": "medium",
+  "max_position_size": 1000
+}
+```
+
+#### List Bot Instances
+```bash
+quantflow bot list
+```
+Display all your deployed bot instances with their status, configuration, and metadata.
+
+#### Update Bot Instance
+```bash
+quantflow bot update <bot_id> <config.json>
+```
+Update an existing bot instance with new configuration.
+
+#### Delete Bot Instance
+```bash
+quantflow bot delete <bot_id>
+```
+Delete a deployed bot instance. Requires confirmation.
+
+**Examples:**
+```bash
+# Deploy a new bot
+quantflow bot deploy my-bot-config.json
+# 🚀 Starting bot deployment process...
+# 📦 Bot name: algorithmic-trader
+# ✅ Config file loaded successfully!
+# 🎉 BOOM! Your bot instance is now deployed!
+
+# List all bot instances
+quantflow bot list
+# 🤖 Found 3 bot instance(s):
+# ID       | Name              | Type    | Version | Schedule  | Created At
+# bot_123  | algorithmic-trader| trading | 1.0.0   | 0 0 * * * | 2024-01-15 10:30
+# bot_456  | arbitrage-bot     | trading | 2.1.0   | N/A       | 2024-01-14 15:45
+
+# Update a bot
+quantflow bot update bot_123 updated-config.json
+# 🔄 Starting bot update process...
+# 🎉 Bot updated successfully!
+
+# Delete a bot (with confirmation)
+quantflow bot delete bot_123
+# ⚠️ Are you sure you want to delete bot 'bot_123'?
+# This action cannot be undone! 💥
+# Type 'yes' to confirm: yes
+# 💀 Bot deleted successfully!
+```
+
+### 📊 Backtest Management
+Deploy, monitor, and manage your trading strategy backtests.
+
+#### Deploy Backtest
+```bash
+quantflow backtest deploy <config.json>
+```
+Deploy a new backtest instance using a JSON configuration file. The backtest name is automatically extracted from the config file.
+
+**Backtest config file format:**
+```json
+{
+  "name": "strategy-backtest",
+  "type": "scheduled/rsi-momentum",
+  "version": "1.0.0",
+  "initial_capital": 10000,
+  "timeframe": "1h",
+  "start_date": "2023-01-01",
+  "end_date": "2023-12-31",
+  "symbols": ["BTCUSDT", "ETHUSDT"]
+}
+```
+
+#### List Backtests
+```bash
+quantflow backtest list
+```
+Display all your backtest instances with their status, progress, and execution details.
+
+#### Delete Backtest
+```bash
+quantflow backtest delete <backtest-id>
+```
+Delete a backtest instance. Requires confirmation for safety.
+
+**Examples:**
+```bash
+# Deploy a new backtest
+quantflow backtest deploy my-strategy-backtest.json
+# 📊 Analyzing market data with backtest configuration...
+# 📦 Backtest name: momentum-strategy
+# ✅ Config loaded
+# ✅ Authenticated
+# ✅ Backtest deployed to quantflow 📊
+# ID: bt_123456789
+# Name: momentum-strategy
+# Status: pending
+# 📝 Use 'quantflow backtest list' to monitor progress
+
+# List all backtests
+quantflow backtest list
+# 📊 Found 2 backtest(s):
+# ID        | Name                | Status   | Progress | Created At      | Updated At
+# bt_123.. | momentum-strategy   | ✅ Completed | 100.0%   | 2024-01-15 10:30 | 2024-01-15 12:45
+# bt_789.. | rsi-backtest        | 🔄 Running   | 67.5%    | 2024-01-15 14:20 | 2024-01-15 15:30
+
+# Delete a backtest (with confirmation)
+quantflow backtest delete bt_123456789
+# ⚠️ Are you sure you want to delete backtest 'bt_123456789'?
+# This action cannot be undone
+# Type 'yes' to confirm: yes
+# ✅ Backtest 'bt_123456789' deleted successfully 🗑️
+```
+
+**Status Indicators:**
+- ⏳ **Pending** - Backtest is queued and waiting to start
+- 🔄 **Running** - Backtest is currently executing
+- ✅ **Completed** - Backtest finished successfully
+- ❌ **Failed** - Backtest encountered an error during execution
+
+### 🛠️ Custom Bot Development
+Deploy and manage your custom trading algorithms to the quantflow marketplace.
+
+#### Deploy Custom Bot
+```bash
+quantflow custom-bot deploy
+```
+Package and deploy your custom bot to the quantflow marketplace from the current directory.
+
+**🐳 Docker-Based Python Vendoring:**
+If your bot includes a `requirements.txt` file, the CLI automatically performs dependency vendoring using Docker:
+- Detects Python dependencies in `requirements.txt`
+- Uses Linux x86-64 Python 3.11 container for cross-platform compatibility
+- Vendors packages to `vendor/` directory for deployment
+- Gracefully falls back if Docker is unavailable
+
+**📁 File Exclusion with .quantflowignore:**
+Control which files are included in your bot deployment with a `.quantflowignore` file:
+- Gitignore-style pattern matching for flexible file exclusion
+- Supports glob patterns (`*`, `**`, `?`) and negation (`!pattern`)
+- Built-in protection for `vendor/` and `node_modules/` directories
+- Default exclusions for common temporary files (`.log`, `.pyc`, `__pycache__/`, etc.)
+
+**Required files in your bot directory:**
+```
+my-bot/
+├── bot-config.yaml      # Bot configuration and metadata
+├── main.py             # Main bot entry point
+├── backtest.py         # Backtesting script
+├── schema.json         # Backtest parameter schema
+├── bot-schema.json     # Bot parameter schema
+├── requirements.txt    # Python dependencies (optional)
+├── .quantflowignore         # File exclusion patterns (optional)
+├── vendor/             # Vendored dependencies (auto-generated)
+└── README.md           # Bot documentation
+```
+
+**Bot configuration (bot-config.yaml):**
+```yaml
+name: my-awesome-bot
+description: "A trading bot that makes money while you sleep"
+version: 1.0.0
+author: your-name
+type: scheduled  # or 'realtime', 'event'
+
+entrypoints:
+  bot: main.py
+  backtest: backtest.py
+
+schema:
+  bot: bot-schema.json
+  backtest: schema.json
+
+readme: README.md
+
+metadata:
+  tags: ["arbitrage", "crypto"]
+  category: "defi"
+```
+
+**File exclusion (.quantflowignore):**
+```
+# Exclude log files but keep important ones
+*.log
+!production.log
+!important.log
+
+# Exclude temporary files
+*.tmp
+*.temp
+**/*.cache
+
+# Exclude test directories and files
+test/
+tests/
+__tests__/
+*_test.py
+test_*.py
+
+# Exclude documentation (except main README)
+docs/**/*.md
+!docs/README.md
+
+# Exclude development and build artifacts
+.env
+.env.local
+build/
+dist/
+**/*.pyc
+**/*.pyo
+__pycache__/
+
+# Exclude OS-specific files
+.DS_Store
+Thumbs.db
+
+# Exclude configuration files except production
+config_*
+!config_production.yaml
+
+# Note: vendor/ and node_modules/ are automatically protected
+```
+
+#### List Custom Bot Versions
+```bash
+quantflow custom-bot versions <type|name>
+```
+List all available versions for a specific custom bot type or name.
+
+#### List Custom Bots
+```bash
+quantflow custom-bot list
+```
+Display all custom bots you've deployed to the marketplace.
+
+#### Get Custom Bot Schema
+```bash
+quantflow custom-bot schema <bot|backtest> <version> <custom-bot-name>
+```
+Retrieve the JSON schema for either the bot or backtest entrypoint of a custom bot.
+
+
+### 🔄 CLI Self-Update
+Keep your CLI up-to-date with automatic update notifications and seamless binary updates.
+
+#### Check for Updates
+```bash
+quantflow check-update
+```
+Check if a newer version of the CLI is available without installing it.
+
+**Options:**
+- `--timeout duration` - Request timeout (default: 10s)
+
+#### Self-Update
+```bash
+quantflow self-update
+```
+Download and install the latest version of the CLI binary.
+
+**Options:**
+- `--check-only` - Only check for updates, don't install
+- `--force` - Force update even if already on latest version  
+- `--yes` - Skip confirmation prompt
+- `--timeout duration` - Download timeout (default: 5m)
+
+**Features:**
+- 🚀 **Automatic startup notifications** - CLI shows update availability on startup
+- 🔒 **Secure downloads** - SHA256 checksum verification prevents corrupted updates
+- 📱 **Cross-platform** - Works on Windows, macOS, and Linux (Intel/ARM)
+- ⚡ **Fast checks** - Update detection completes in <2 seconds
+- 🛡️ **Safe updates** - Binary replacement with rollback on failure
+- 🔧 **Progress indication** - Real-time download progress during updates
+
+**Examples:**
+```bash
+# Check for updates manually
+quantflow check-update
+# 🔍 Checking for updates...
+# ⚠️  Update available!
+#    Current: 1.0.0
+#    Latest:  1.0.1
+# 
+# 💡 Run 'quantflow self-update' to update now.
+
+# Update to latest version
+quantflow self-update
+# 🔍 Checking for updates...
+# ⚠️  Update available!
+#    Current: 1.0.0
+#    Latest:  1.0.1
+# 
+# ❓ Do you want to update now? [y/N]: y
+# 
+# 🚀 Starting update process...
+# 📦 Downloading: 25% (1024/4096 bytes)
+# 📦 Downloading: 50% (2048/4096 bytes)
+# 📦 Downloading: 100% (4096/4096 bytes)
+# ✅ Successfully updated to version 1.0.1
+# 
+# 🎉 Update completed successfully!
+#    New version: 1.0.1
+# 
+# 💡 The update will take effect the next time you run the CLI.
+
+# Check for updates only (no installation)
+quantflow self-update --check-only
+# 🔍 Checking for updates...
+# ✅ You're already running the latest version: 1.0.1
+
+# Force update to latest version
+quantflow self-update --force --yes
+# 🔄 Forcing update to latest version: 1.0.1
+# 🚀 Starting update process...
+# ✅ Successfully updated to version 1.0.1
+```
+
+## Configuration
+
+### Environment Variables
+- `QUANTFLOW_API_URL` - **Deprecated legacy fallback** for API base URL. Use `quantflow env` instead. Only honoured when no named environments are defined.
+- `QUANTFLOW_CLI_UPDATE_CHANNEL` - Set update channel (`production` or `staging`, default: `production`)
+- `QUANTFLOW_QUIET` - Suppress startup update notifications when set to any value
+
+### Configuration Files
+- **Bot instances**: Use JSON configuration files with required fields (`name`, `type`, `version`)
+- **Backtest instances**: Use JSON configuration files with required fields (`name`, `type`, `version`)
+- **Custom bots**: Use YAML configuration files (`bot-config.yaml`) with comprehensive metadata
+- **Authentication**: API keys stored securely in user's home directory
+
+## Configuration Examples
+
+### Bot Instance Configuration
+Required fields: `name`, `type`, `version`
+
+### Backtest Configuration
+Required fields: `name`, `type`, `version`
+
+### Simple Trading Bot
+```json
+{
+  "name": "simple-trader",
+  "type": "scheduled/momentum",
+  "version": "1.0.0",
+  "schedule": "*/15 * * * *",
+  "symbol": "BTCUSDT",
+  "risk_level": "low"
+}
+```
+
+### Analysis Bot
+```json
+{
+  "name": "market-analyzer",
+  "type": "scheduled/technical-analysis",
+  "version": "2.0.1",
+  "timeframe": "1h",
+  "indicators": ["RSI", "MACD", "Bollinger"],
+  "alert_threshold": 0.05
+}
+```
+
+### Real-time Event Bot
+```json
+{
+  "name": "news-trader",
+  "type": "realtime/news-trading",
+  "version": "1.2.0",
+  "sources": ["twitter", "reddit", "news"],
+  "sentiment_threshold": 0.7,
+  "max_trades_per_day": 5
+}
+```
+
+### Backtest Examples
+
+#### Simple Strategy Backtest
+```json
+{
+  "name": "ma-crossover-backtest",
+  "type": "scheduled/moving-average-crossover",
+  "version": "1.0.0",
+  "initial_capital": 10000,
+  "timeframe": "4h",
+  "start_date": "2023-01-01",
+  "end_date": "2023-12-31",
+  "symbol": "BTCUSDT",
+  "fast_ma": 20,
+  "slow_ma": 50
+}
+```
+
+#### Multi-Asset Portfolio Backtest
+```json
+{
+  "name": "portfolio-backtest",
+  "type": "scheduled/portfolio-rebalancing",
+  "version": "2.1.0",
+  "initial_capital": 50000,
+  "timeframe": "1d",
+  "start_date": "2022-01-01",
+  "end_date": "2023-12-31",
+  "symbols": ["BTCUSDT", "ETHUSDT", "ADAUSDT"],
+  "allocation_btcusdt": 0.5,
+  "allocation_ethusdt": 0.3,
+  "allocation_adausdt": 0.2,
+  "rebalance_frequency": "monthly"
+}
+```
+
+#### Risk Management Backtest
+```json
+{
+  "name": "risk-management-backtest",
+  "type": "scheduled/risk-parity",
+  "version": "1.3.0",
+  "initial_capital": 25000,
+  "timeframe": "1h",
+  "start_date": "2023-06-01",
+  "end_date": "2023-12-31",
+  "max_position_size": 5000,
+  "stop_loss": 0.02,
+  "take_profit": 0.06,
+  "risk_per_trade": 0.01
+}
+```
+
+## Error Handling
+
+The CLI provides detailed error messages and suggestions:
+
+```bash
+# Missing required field in config
+quantflow bot deploy invalid-config.json
+# ❌ Bot name not found in config file. Please add a 'name' field to your config.json
+
+# Invalid API key
+quantflow bot list
+# ❌ Authentication failed: API key is invalid or revoked
+# 🔑 API key appears to be invalid. Let's get a new one...
+
+# Bot not found
+quantflow bot delete nonexistent-bot
+# ❌ bot not found: nonexistent-bot
+
+# Backtest configuration errors
+quantflow backtest deploy invalid-backtest.json
+# ❌ Missing required field: name
+# ❌ Missing required field: type
+# ❌ Missing required field: version
+
+# Backtest not found
+quantflow backtest delete nonexistent-backtest
+# ❌ backtest not found: nonexistent-backtest
+```
+
+## Development
+
+### Prerequisites
+- Go 1.21+
+- Make
+- Docker (optional, for Python dependency vendoring)
+
+### Building
+```bash
+make build                           # Build development binary (version: 0.0.0-dev)
+make build VERSION=v2025.01.15-123  # Build with custom version
+make install                         # Install CLI locally
+make release                         # Cross-platform release builds
+make release VERSION=v2025.01.15-123 # Release builds with custom version
+```
+
+**Version Injection**: The CLI supports version injection at build time. The CI pipeline automatically injects the appropriate version during builds:
+- **Local development**: Shows `0.0.0-dev` 
+- **Staging builds**: Shows `develop-YYYY.MM.DD-RUN_NUMBER` (e.g., `develop-2025.01.15-164`)
+- **Production builds**: Shows `vYYYY.MM.DD-RUN_NUMBER` (e.g., `v2025.01.15-164`)
+
+### Testing
+```bash
+make test           # Run all tests
+make test-coverage  # Run tests with coverage report
+make lint           # Run linter (requires golangci-lint)
+make fmt            # Format code
+make verify         # Full verification (format + lint + test + build)
+```
+
+### Project Structure
+
+```
+.
+├── main.go              # CLI entry point
+├── cmd/                 # Command implementations
+│   ├── auth.go         # Authentication commands
+│   ├── backtest.go     # Backtest management
+│   ├── bot.go          # Bot instance management
+│   ├── custom_bot.go   # Custom bot development
+│   ├── user_bot.go     # User bot management
+│   ├── check_update.go # Update checking command
+│   └── self_update.go  # Self-update command
+├── internal/           # Internal packages
+│   ├── api.go         # API client and data structures
+│   ├── auth.go        # Authentication logic
+│   ├── config.go      # Configuration handling
+│   ├── ignore.go      # .quantflowignore file parsing and pattern matching
+│   ├── vendor.go      # Docker-based Python vendoring
+│   ├── zip.go         # File packaging utilities
+│   ├── version.go     # Version parsing and comparison
+│   └── updater.go     # Self-update logic and binary management
+├── tests/             # Test files
+│   ├── api_test.go    # API client tests
+│   ├── auth_test.go   # Authentication tests
+│   ├── backtest_test.go # Backtest management tests
+│   ├── bot_test.go    # Bot management tests
+│   ├── cli_backtest_test.go # CLI backtest command tests
+│   ├── cli_test.go    # CLI command tests
+│   ├── config_test.go # Configuration tests
+│   ├── ignore_test.go # File ignore pattern tests
+│   ├── vendor_test.go # Docker vendoring tests
+│   ├── zip_test.go    # ZIP utilities tests
+│   ├── version_test.go # Version parsing tests
+│   ├── updater_test.go # Self-update logic tests
+│   └── integration_update_test.go # Update command integration tests
+├── Makefile           # Build automation
+├── go.mod            # Go modules
+├── go.sum            # Go module checksums
+├── CLAUDE.md         # AI assistant memory
+└── README.md         # This file
+```
+
+## API Reference
+
+The CLI interacts with the quantflow platform API:
+
+- **Base URL**: `https://api.quantflow.io`
+- **Authentication**: API key via `Authorization: ApiKey <key>` header
+- **Rate Limits**: Automatic retry with exponential backoff
+- **Error Handling**: Comprehensive error messages with suggested actions
+
+### Key Endpoints
+- `GET /auth/validate-api-key` - Validate API key
+- `GET /bot` - List bot instances
+- `POST /bot` - Deploy bot instance
+- `PUT /bot/{id}` - Update bot instance
+- `DELETE /bot/{id}` - Delete bot instance
+- `GET /backtest` - List backtest instances
+- `POST /backtest` - Deploy backtest instance
+- `DELETE /backtest/{id}` - Delete backtest instance
+- `GET /custom-bots` - List custom bots
+- `POST /custom-bots/{name}` - Deploy custom bot
+- `GET /user-bots` - List user bots
+
+## Troubleshooting
+
+### Common Issues
+
+**Authentication Problems:**
+```bash
+# If you get authentication errors, try logging in again
+quantflow auth logout
+quantflow auth login
+```
+
+**Config File Issues:**
+```bash
+# Validate your JSON config file
+cat config.json | jq .  # Should not show syntax errors
+```
+
+**Network Issues:**
+```bash
+# Check connectivity to the API
+curl -I https://api.quantflow.io/
+```
+
+**Update Issues:**
+```bash
+# If you see update notifications but don't want them
+export QUANTFLOW_QUIET=1
+quantflow help  # No update notifications
+
+# To check for updates manually
+quantflow check-update
+
+# If updates fail due to permissions
+sudo quantflow self-update  # May be needed on some systems
+
+# To use staging channel (internal use only)
+export QUANTFLOW_CLI_UPDATE_CHANNEL=staging
+quantflow check-update
+```
+
+**Permission Issues:**
+```bash
+# Make sure the binary is executable
+chmod +x quantflow
+```
+
+**Docker/Vendoring Issues:**
+```bash
+# Check if Docker is installed and running
+docker --version
+docker info
+
+# If Docker is unavailable, the CLI will proceed without vendoring
+# Manual vendoring (if needed):
+pip install --target vendor -r requirements.txt
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes
+4. Run `make verify` to ensure quality
+5. Commit your changes (`git commit -m 'Add amazing feature'`)
+6. Push to the branch (`git push origin feature/amazing-feature`)
+7. Submit a pull request
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Support
+
+- 📚 Documentation: [docs.quantflow.io](https://docs.quantflow.io)
+- 💬 Discord: [Join for support](https://discord.gg/g5mp57nK)
+- 🐛 Issues: [GitHub Issues](https://github.com/quantflowplatform/cli/issues)
+
+---
+
+*Built with ❤️ for the trading community by Alex and Claude*

@@ -1,0 +1,69 @@
+# Makefile for quantflow CLI
+
+.PHONY: build test clean install lint security-audit security-scan
+
+VERSION ?= dev
+LDFLAGS = -ldflags="-w -s -X main.VERSION=$(VERSION)"
+
+# Build the CLI binary
+build:
+	go build $(LDFLAGS) -o bin/quantflow .
+
+# Run tests
+test:
+	go test ./... -v
+
+# Run tests with coverage
+test-coverage:
+	go test ./... -v -coverprofile=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+
+# Clean build artifacts
+clean:
+	rm -rf bin/
+	rm -f coverage.out coverage.html
+	rm -f bot_*.zip
+
+# Install dependencies
+deps:
+	go mod tidy
+	go mod download
+
+# Lint the code
+lint:
+	golangci-lint run
+
+# Install the CLI locally
+install: build
+	@mkdir -p ~/.quantflow/bin
+	cp bin/quantflow ~/.quantflow/bin/quantflow
+
+# Run the CLI in development mode
+dev: build
+	./bin/quantflow
+
+# Format code
+fmt:
+	go fmt ./...
+
+# Verify everything is ready for release
+verify: fmt lint test build
+	@echo "✅ All checks passed!"
+
+security-audit:
+	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck is required for Go vulnerability scanning. Install: go install golang.org/x/vuln/cmd/govulncheck@latest"; exit 1; }
+	govulncheck ./...
+
+security-scan: security-audit
+
+# Portable sha256sum (macOS ships shasum instead of sha256sum)
+SHA256SUM := $(shell command -v sha256sum 2>/dev/null || echo "shasum -a 256")
+
+# Release build with optimizations
+release:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/quantflow-linux-amd64 .
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o bin/quantflow-linux-arm64 .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o bin/quantflow-darwin-amd64 .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o bin/quantflow-darwin-arm64 .
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o bin/quantflow-windows-amd64.exe .
+	cd bin && $(SHA256SUM) quantflow-* > checksums.txt

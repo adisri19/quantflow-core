@@ -1,0 +1,284 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+	"quantflow/internal"
+	"quantflow/internal/logger"
+)
+
+func NewAuthCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Manage API authentication",
+		Long:  "Login, logout, and check authentication status",
+	}
+
+	cmd.AddCommand(NewLoginCmd())
+	cmd.AddCommand(NewStatusCmd())
+	cmd.AddCommand(NewLogoutCmd())
+	cmd.AddCommand(NewSecretsCmd())
+	return cmd
+}
+
+func NewLoginCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "login",
+		Short: "Set or update your API key",
+		Long:  "Connect to quantflow platform with your API key",
+		Run:   authLogin,
+	}
+}
+
+func NewStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Check if your API key is valid",
+		Long:  "Verify your connection to quantflow platform",
+		Run:   authStatus,
+	}
+}
+
+func NewLogoutCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout",
+		Short: "Remove saved API key",
+		Long:  "Clear your saved credentials from this device",
+		Run:   authLogout,
+	}
+}
+
+func authLogin(cmd *cobra.Command, args []string) {
+	logger.StartSpinner("Logging in")
+
+	auth, err := internal.PromptForNewAPIKey()
+	if err != nil {
+		logger.StopSpinnerWithError("Login failed")
+		logger.Error("%v", err)
+		os.Exit(1)
+	}
+
+	logger.UpdateSpinner("Verifying API key")
+
+	// Test the key
+	apiClient := internal.NewAPIClient(internal.GetAPIBaseURL())
+	if err := apiClient.TestAPIKey(auth); err != nil {
+		logger.StopSpinnerWithError("Authentication failed")
+		logger.Error("%v", err)
+		logger.Print("Check your API key and permissions")
+		os.Exit(1)
+	}
+
+	logger.StopSpinnerWithSuccess("Logged in successfully")
+	logger.Verbose("API key saved to ~/.quantflow/auth.json")
+}
+
+func authStatus(cmd *cobra.Command, args []string) {
+	logger.StartSpinner("Checking authentication status")
+
+	auth, err := internal.LoadAuth()
+	if err != nil {
+		logger.StopSpinnerWithError("Not logged in")
+		logger.Print("Run 'quantflow auth login' to authenticate")
+		os.Exit(1)
+	}
+
+	apiClient := internal.NewAPIClient(internal.GetAPIBaseURL())
+	if err := apiClient.TestAPIKey(auth); err != nil {
+		logger.StopSpinnerWithError("Connection failed")
+		logger.Error("%v", err)
+		logger.Print("Run 'quantflow auth login' to reconnect")
+		os.Exit(1)
+	}
+
+	logger.StopSpinnerWithSuccess("Authenticated")
+	logger.Print("  Connected since: %s", auth.CreatedAt.Format("2006-01-02 15:04:05"))
+}
+
+func authLogout(cmd *cobra.Command, args []string) {
+	if err := internal.RemoveAuth(); err != nil {
+		if os.IsNotExist(err) {
+			logger.Info("No credentials found")
+		} else {
+			logger.Error("Failed to clear credentials: %v", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Success("Logged out successfully")
+		logger.Verbose("Credentials removed from ~/.quantflow/auth.json")
+	}
+}
+
+// NewSecretsCmd creates the secrets subcommand for managing build secrets
+func NewSecretsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "secrets",
+		Short: "Manage build secrets for private dependencies",
+		Long: `Manage build-time secrets used during dependency vendoring.
+
+These secrets are used to authenticate with private package repositories
+(like private GitHub repos) when installing dependencies.
+
+Examples:
+  quantflow auth secrets show                      # Show configured secrets
+  quantflow auth secrets set github-token <token>  # Set GitHub PAT
+  quantflow auth secrets clear                     # Remove all secrets`,
+	}
+
+	cmd.AddCommand(NewSecretsShowCmd())
+	cmd.AddCommand(NewSecretsSetCmd())
+	cmd.AddCommand(NewSecretsClearCmd())
+	return cmd
+}
+
+func NewSecretsShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show",
+		Short: "Show configured build secrets",
+		Long:  "Display currently configured build secrets (tokens are masked)",
+		Run:   secretsShow,
+	}
+}
+
+func NewSecretsSetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <secret-name> <value>",
+		Short: "Set a build secret",
+		Long: `Set a build secret for dependency vendoring.
+
+Available secrets:
+  github-token          GitHub PAT for private git repos (all languages)
+  pip-index-url         Private PyPI index URL (Python)
+  npm-token             Private npm registry token (Node.js)
+  nuget-token           Private NuGet feed token (C#/.NET)
+  cargo-registry-token  Private Cargo registry token (Rust)
+  maven-user            Private Maven repo username (Scala)
+  maven-token           Private Maven repo token (Scala)
+
+Examples:
+  quantflow auth secrets set github-token ghp_xxxxxxxxxxxx
+  quantflow auth secrets set pip-index-url https://user:pass@pypi.example.com/simple/
+  quantflow auth secrets set npm-token npm_xxxxxxxxxxxx
+  quantflow auth secrets set nuget-token oy2xxxxxxxxxxxxx`,
+		Args: cobra.ExactArgs(2),
+		Run:  secretsSet,
+	}
+}
+
+func NewSecretsClearCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clear",
+		Short: "Clear all build secrets",
+		Long:  "Remove all saved build secrets from this device",
+		Run:   secretsClear,
+	}
+}
+
+func secretsShow(cmd *cobra.Command, args []string) {
+	secrets, err := internal.LoadBuildSecrets()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load secrets: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Build Secrets:")
+	fmt.Println("--------------")
+
+	// Universal
+	fmt.Println("\n  Universal (all languages):")
+	printSecret("  github-token", secrets.GitHubToken, "GITHUB_TOKEN")
+
+	// Python
+	fmt.Println("\n  Python:")
+	printSecret("  pip-index-url", secrets.PipIndexURL, "PIP_EXTRA_INDEX_URL")
+
+	// Node.js
+	fmt.Println("\n  Node.js:")
+	printSecret("  npm-token", secrets.NpmToken, "NPM_TOKEN")
+
+	// C#/.NET
+	fmt.Println("\n  C#/.NET:")
+	printSecret("  nuget-token", secrets.NuGetToken, "NUGET_TOKEN")
+
+	// Rust
+	fmt.Println("\n  Rust:")
+	printSecret("  cargo-registry-token", secrets.CargoRegistryToken, "CARGO_REGISTRY_TOKEN")
+
+	// Scala
+	fmt.Println("\n  Scala:")
+	printSecret("  maven-user", secrets.MavenUser, "MAVEN_USER")
+	printSecret("  maven-token", secrets.MavenToken, "MAVEN_TOKEN")
+
+	fmt.Println("\nThese secrets are passed as environment variables during builds.")
+	fmt.Println("Use 'quantflow auth secrets set <name> <value>' to configure.")
+}
+
+func printSecret(name, value, envVar string) {
+	if value != "" {
+		fmt.Printf("    %-22s %s (→ %s)\n", name+":", internal.MaskToken(value), envVar)
+	} else {
+		fmt.Printf("    %-22s (not set)\n", name+":")
+	}
+}
+
+func secretsSet(cmd *cobra.Command, args []string) {
+	secretName := args[0]
+	secretValue := args[1]
+
+	secrets, err := internal.LoadBuildSecrets()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load existing secrets: %v\n", err)
+		os.Exit(1)
+	}
+
+	var envVar string
+	switch secretName {
+	case "github-token":
+		secrets.GitHubToken = secretValue
+		envVar = "GITHUB_TOKEN"
+	case "pip-index-url":
+		secrets.PipIndexURL = secretValue
+		envVar = "PIP_EXTRA_INDEX_URL"
+	case "npm-token":
+		secrets.NpmToken = secretValue
+		envVar = "NPM_TOKEN"
+	case "nuget-token":
+		secrets.NuGetToken = secretValue
+		envVar = "NUGET_TOKEN"
+	case "cargo-registry-token":
+		secrets.CargoRegistryToken = secretValue
+		envVar = "CARGO_REGISTRY_TOKEN"
+	case "maven-user":
+		secrets.MavenUser = secretValue
+		envVar = "MAVEN_USER"
+	case "maven-token":
+		secrets.MavenToken = secretValue
+		envVar = "MAVEN_TOKEN"
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown secret: %s\n", secretName)
+		fmt.Println("Available secrets:")
+		fmt.Println("  github-token, pip-index-url, npm-token, nuget-token,")
+		fmt.Println("  cargo-registry-token, maven-user, maven-token")
+		os.Exit(1)
+	}
+
+	if err := internal.SaveBuildSecrets(secrets); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to save secret: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ Secret '%s' saved\n", secretName)
+	fmt.Printf("  Value: %s\n", internal.MaskToken(secretValue))
+	fmt.Printf("  Env:   %s\n", envVar)
+}
+
+func secretsClear(cmd *cobra.Command, args []string) {
+	if err := internal.ClearBuildSecrets(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to clear secrets: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("✓ All build secrets cleared")
+}
