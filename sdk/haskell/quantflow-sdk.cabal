@@ -1,0 +1,59 @@
+cabal-version:      3.0
+name:               quantflow-sdk
+version:            0.1.5.0
+synopsis:           quantflow trading bot SDK for Haskell
+description:        Utilities for building trading bots on quantflow platform.
+                    Provides configuration parsing, result output, and metric emission.
+license:            Apache-2.0
+license-file:       LICENSE
+author:             QuantFlow Team
+maintainer:         support@quantflow.io
+copyright:          2024-2026 QuantFlow Team
+category:           Development, Trading, Finance
+build-type:         Simple
+extra-doc-files:    README.md
+bug-reports:        https://github.com/quantflow-io/quantflow/issues
+homepage:           https://quantflow.io
+source-repository head
+    type:     git
+    location: https://github.com/quantflow-io/quantflow.git
+    subdir:   sdk/haskell
+
+library
+    exposed-modules:    QuantFlow.Input
+                        QuantFlow.State
+                        QuantFlow.Query
+    build-depends:      base ^>=4.18,
+                        aeson ^>=2.2,
+                        bytestring ^>=0.11,
+                        text ^>=2.0,
+                        containers ^>=0.6,
+                        time ^>=1.12,
+                        directory ^>=1.3,
+                        filepath ^>=1.4,
+                        network ^>=3.1,
+                        http-types ^>=0.12
+    hs-source-dirs:     src
+    default-language:   Haskell2010
+    ghc-options:        -Wall
+
+test-suite quantflow-sdk-test
+    type:               exitcode-stdio-1.0
+    main-is:            Spec.hs
+    other-modules:      InputSpec
+                        StateSpec
+                        QuerySpec
+    hs-source-dirs:     test
+    default-language:   Haskell2010
+    ghc-options:        -Wall -threaded -rtsopts -with-rtsopts=-N
+    build-depends:      base ^>=4.18,
+                        quantflow-sdk,
+                        hspec ^>=2.11,
+                        aeson ^>=2.2,
+                        bytestring ^>=0.11,
+                        text ^>=2.0,
+                        containers ^>=0.6,
+                        directory ^>=1.3,
+                        filepath ^>=1.4,
+                        temporary ^>=1.3,
+                        silently ^>=1.2
