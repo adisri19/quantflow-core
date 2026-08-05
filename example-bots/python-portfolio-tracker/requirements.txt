@@ -1,0 +1,5 @@
+# quantflow SDK for bot development
+quantflow-sdk>=0.3.1
+
+# Structured logging for metric emission
+structlog>=24.0.0
