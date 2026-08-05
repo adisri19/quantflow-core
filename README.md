@@ -71,6 +71,4 @@ QuantFlow supports strategy development with native SDK bindings:
 
 ---
 
-## License
 
-This project is licensed under the Apache License 2.0. Original copyright by [Alpha Neuron](https://the0.app). Rebranded modifications by QuantFlow Team.
