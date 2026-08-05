@@ -1,0 +1,9 @@
+pb/*.go
+bad-bot.zip
+bad-bot/
+CHANGE.md
+PR_MESSAGE.md
+build/
+notes/coverage*.out
+*.out
+/app

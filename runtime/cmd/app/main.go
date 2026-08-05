@@ -1,0 +1,658 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+	"go.mongodb.org/mongo-driver/mongo"
+	mongoOptions "go.mongodb.org/mongo-driver/mongo/options"
+
+	"runtime/internal/constants"
+	dockerrunner "runtime/internal/docker"
+	botnatssubscriber "runtime/internal/docker/bot-runner/subscriber"
+	schedulenatssubscriber "runtime/internal/docker/bot-scheduler/subscriber"
+	"runtime/internal/gc"
+	"runtime/internal/k8s/controller"
+	"runtime/internal/k8s/detect"
+	"runtime/internal/k8s/health"
+	"runtime/internal/runtime/storage"
+	"runtime/internal/util"
+)
+
+// Version is the current version of the runtime
+const Version = "1.3.2"
+
+var (
+	// Global flags
+	mongoUri string
+	natsUrl  string
+
+	// Bot Runner flags
+	botRunnerReconcileInterval time.Duration
+
+	// Bot Scheduler flags
+	botSchedulerCheckInterval time.Duration
+
+	// Controller-specific flags
+	controllerNamespace         string
+	controllerReconcileInterval time.Duration
+
+	// MinIO flags for bot code download
+	minioEndpoint  string
+	minioAccessKey string
+	minioSecretKey string
+	minioBucket    string
+	minioUseSSL    bool
+
+	// Runtime image for init containers and sidecars
+	runtimeImage           string
+	runtimeImagePullPolicy string
+
+	// Query server flags
+	queryServerPort int
+
+	// GC flags
+	gcInterval time.Duration
+)
+
+// rootCmd represents the base command when called without any subcommands
+var rootCmd = &cobra.Command{
+	Use:   "quantflow-runtime",
+	Short: "Unified runtime for bot-runner and bot-scheduler",
+	Long: `quantflow-runtime is a unified executable that provides command-based service selection
+for bot execution and scheduled bot management.
+
+Examples:
+  quantflow-runtime bot-runner
+  quantflow-runtime bot-scheduler
+  quantflow-runtime controller`,
+}
+
+// Bot Runner Command - simplified single-process service
+var botRunnerCmd = &cobra.Command{
+	Use:   "bot-runner",
+	Short: "Run bot execution service",
+	Long: `Manages live bot execution as a single-process service.
+Connects to MongoDB for bot state and optionally to NATS for real-time events.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		runBotService()
+	},
+}
+
+// Bot Scheduler Command - simplified single-process service
+var botSchedulerCmd = &cobra.Command{
+	Use:   "bot-scheduler",
+	Short: "Run scheduled bot management service",
+	Long:  `Manages scheduled bot execution with cron-based scheduling as a single-process service.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		runScheduleService()
+	},
+}
+
+// Controller Command (Kubernetes-native mode)
+var controllerCmd = &cobra.Command{
+	Use:   "controller",
+	Short: "Run Kubernetes-native bot controller",
+	Long: `Runs the bot controller in Kubernetes-native mode.
+Each bot becomes its own Pod managed by this controller.
+The controller reads desired state from MongoDB and reconciles with K8s.
+
+This mode should only be used when running inside a Kubernetes cluster
+with RUNTIME_MODE=controller environment variable set.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		runController()
+	},
+}
+
+// Query Server Command - standalone query execution service
+var queryServerCmd = &cobra.Command{
+	Use:   "query-server",
+	Short: "Run standalone query execution server",
+	Long: `Runs a standalone HTTP server for executing queries against bots.
+Supports both realtime and scheduled bots by querying both MongoDB collections.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		runQueryServer()
+	},
+}
+
+// GC command - clean up orphaned bot artifacts from MinIO
+var gcCmd = &cobra.Command{
+	Use:   "gc",
+	Short: "Clean up orphaned bot artifacts from MinIO",
+	Long: `Removes log and state files from MinIO for bots that no longer exist in MongoDB.
+By default runs once and exits (for K8s CronJob). Use --interval for continuous mode (Docker).`,
+	Run: func(cmd *cobra.Command, args []string) {
+		runGC()
+	},
+}
+
+// Version command
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the version number",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("quantflow-runtime version %s\n", Version)
+	},
+}
+
+func main() {
+	// Add persistent flags
+	rootCmd.PersistentFlags().StringVar(&mongoUri, "mongo-uri", getEnv("MONGO_URI", "mongodb://localhost:27017"), "MongoDB connection URI")
+	rootCmd.PersistentFlags().StringVar(&natsUrl, "nats-url", getEnv("NATS_URL", ""), "NATS connection URL (optional)")
+
+	// Bot Runner command with flags
+	botRunnerCmd.Flags().DurationVar(&botRunnerReconcileInterval, "reconcile-interval", 30*time.Second, "How often to reconcile bot state")
+	rootCmd.AddCommand(botRunnerCmd)
+
+	// Bot Scheduler command with flags
+	botSchedulerCmd.Flags().DurationVar(&botSchedulerCheckInterval, "check-interval", 10*time.Second, "How often to check for due schedules")
+	rootCmd.AddCommand(botSchedulerCmd)
+
+	// Controller command with flags
+	controllerCmd.Flags().StringVar(&controllerNamespace, "namespace", getEnv("NAMESPACE", "quantflow"), "Kubernetes namespace for bot pods")
+	controllerCmd.Flags().DurationVar(&controllerReconcileInterval, "reconcile-interval", 30*time.Second, "How often to reconcile state")
+	controllerCmd.Flags().StringVar(&minioEndpoint, "minio-endpoint", getEnv("MINIO_ENDPOINT", "minio:9000"), "MinIO endpoint for bot code")
+	controllerCmd.Flags().StringVar(&minioBucket, "minio-bucket", getEnv("MINIO_BUCKET", "quantflow-custom-bots"), "MinIO bucket for bot code")
+	controllerCmd.Flags().StringVar(&runtimeImage, "runtime-image", getEnv("RUNTIME_IMAGE", "runtime:latest"), "Runtime image for init containers and sidecars")
+	controllerCmd.Flags().StringVar(&runtimeImagePullPolicy, "runtime-image-pull-policy", getEnv("RUNTIME_IMAGE_PULL_POLICY", "IfNotPresent"), "Image pull policy for runtime init/sidecar (Never, IfNotPresent, Always)")
+	// MinIO credentials read from environment only (not CLI flags) for security
+	minioAccessKey = getEnv("MINIO_ACCESS_KEY", "")
+	minioSecretKey = getEnv("MINIO_SECRET_KEY", "")
+	minioUseSSL = getEnv("MINIO_USE_SSL", "false") == "true"
+	rootCmd.AddCommand(controllerCmd)
+
+	// Query server command with flags
+	queryServerCmd.Flags().IntVar(&queryServerPort, "port", getEnvInt("QUERY_SERVER_PORT", 9477), "Port for query server")
+	rootCmd.AddCommand(queryServerCmd)
+
+	gcCmd.Flags().DurationVar(&gcInterval, "interval", 0, "Run continuously at this interval (0 = run once and exit)")
+	rootCmd.AddCommand(gcCmd)
+
+	rootCmd.AddCommand(versionCmd)
+
+	// Execute the root command
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runBotService runs the simplified bot service
+func runBotService() {
+	util.LogMaster("Starting bot-runner service...")
+	util.LogMaster("MongoDB: %s", maskCredentialsInURL(mongoUri))
+	if natsUrl != "" {
+		util.LogMaster("NATS: %s", maskCredentialsInURL(natsUrl))
+	} else {
+		util.LogMaster("NATS: disabled (poll-only mode)")
+	}
+	util.LogMaster("Reconcile interval: %v", botRunnerReconcileInterval)
+
+	// Start health server for container health checks
+	healthServer := health.NewServer(8080)
+	healthServer.Start()
+
+	// Create bot service (health server is passed in so the service
+	// controls readiness/liveness based on actual dependency health)
+	service, err := dockerrunner.NewBotService(dockerrunner.BotServiceConfig{
+		MongoURI:          mongoUri,
+		NATSUrl:           natsUrl,
+		Logger:            &util.DefaultLogger{},
+		DBName:            constants.BOT_RUNNER_DB_NAME,
+		Collection:        constants.BOT_RUNNER_COLLECTION,
+		ReconcileInterval: botRunnerReconcileInterval,
+		HealthServer:      healthServer,
+	})
+	if err != nil {
+		util.LogMaster("Failed to create bot service: %v", err)
+		os.Exit(1)
+	}
+
+	// Setup signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ch
+		util.LogMaster("Received interrupt signal, shutting down...")
+		healthServer.SetReady(false)
+		cancel()
+	}()
+
+	// Run the service (blocks until shutdown)
+	if err := service.Run(ctx); err != nil {
+		util.LogMaster("Bot service error: %v", err)
+		os.Exit(1)
+	}
+
+	// Shutdown health server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	healthServer.Stop(shutdownCtx)
+
+	util.LogMaster("Bot service stopped")
+}
+
+// runScheduleService runs the simplified schedule service
+func runScheduleService() {
+	util.LogMaster("Starting bot-scheduler service...")
+	util.LogMaster("MongoDB: %s", maskCredentialsInURL(mongoUri))
+	util.LogMaster("NATS: %s", maskCredentialsInURL(natsUrl))
+	util.LogMaster("Check interval: %v", botSchedulerCheckInterval)
+
+	// Validate NATS URL (required for schedule service)
+	if natsUrl == "" {
+		util.LogMaster("ERROR: NATS_URL is required for bot-scheduler")
+		os.Exit(1)
+	}
+
+	// Start health server for container health checks
+	healthServer := health.NewServer(8080)
+	healthServer.Start()
+
+	// Create schedule service (health server passed in for dep-based readiness)
+	service, err := dockerrunner.NewScheduleService(dockerrunner.ScheduleServiceConfig{
+		MongoURI:      mongoUri,
+		NATSUrl:       natsUrl,
+		Logger:        &util.DefaultLogger{},
+		DBName:        constants.BOT_SCHEDULER_DB_NAME,
+		Collection:    constants.BOT_SCHEDULE_COLLECTION,
+		CheckInterval: botSchedulerCheckInterval,
+		HealthServer:  healthServer,
+	})
+	if err != nil {
+		util.LogMaster("Failed to create schedule service: %v", err)
+		os.Exit(1)
+	}
+
+	// Setup signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ch
+		util.LogMaster("Received interrupt signal, shutting down...")
+		healthServer.SetReady(false)
+		cancel()
+	}()
+
+	// Run the service (blocks until shutdown)
+	if err := service.Run(ctx); err != nil {
+		util.LogMaster("Schedule service error: %v", err)
+		os.Exit(1)
+	}
+
+	// Shutdown health server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	healthServer.Stop(shutdownCtx)
+
+	util.LogMaster("Schedule service stopped")
+}
+
+// Controller Implementation (Kubernetes-native mode)
+func runController() {
+	util.LogMaster("Starting Kubernetes-native bot controller...")
+	util.LogMaster("Runtime mode: %s", detect.DetectRuntimeMode())
+	util.LogMaster("Namespace: %s", controllerNamespace)
+	util.LogMaster("Reconcile interval: %v", controllerReconcileInterval)
+
+	// Validate MinIO credentials (required for downloading bot code)
+	if minioAccessKey == "" || minioSecretKey == "" {
+		util.LogMaster("ERROR: MinIO credentials (MINIO_ACCESS_KEY, MINIO_SECRET_KEY) are required")
+		os.Exit(1)
+	}
+	if minioEndpoint == "" {
+		util.LogMaster("ERROR: MINIO_ENDPOINT is required")
+		os.Exit(1)
+	}
+
+	// Start health server for K8s probes
+	healthServer := health.NewServer(8080)
+	healthServer.Start()
+
+	// Check if we're in the right environment
+	if !detect.IsKubernetesEnvironment() {
+		util.LogMaster("WARNING: Not running in Kubernetes environment. Controller may not work correctly.")
+	}
+
+	// Create MongoDB client
+	mongoClient, err := createMongoClient(mongoUri)
+	if err != nil {
+		util.LogMaster("Failed to create MongoDB client: %v", err)
+		os.Exit(1)
+	}
+	defer mongoClient.Disconnect(context.Background())
+
+	// Start NATS subscribers to sync bots and schedules from API to MongoDB
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Use global natsUrl (already set via CLI flag or env var)
+	if natsUrl == "" {
+		util.LogMaster("WARNING: NATS_URL not set, bots/schedules won't be synced from API")
+	} else {
+		// Bot NATS subscriber
+		botSubscriber, err := botnatssubscriber.NewNATSSubscriber(ctx, botnatssubscriber.SubscriberOptions{
+			NATSUrl:            natsUrl,
+			DBName:             constants.BOT_RUNNER_DB_NAME,
+			CollectionName:     constants.BOT_RUNNER_COLLECTION,
+			MaxBotPerPartition: 100,
+			MaxRetries:         3,
+			Logger:             &util.DefaultLogger{},
+		})
+		if err != nil {
+			util.LogMaster("Failed to create bot NATS subscriber: %v", err)
+			os.Exit(1)
+		}
+		if err := botSubscriber.Start(ctx); err != nil {
+			util.LogMaster("Failed to start bot NATS subscriber: %v", err)
+			os.Exit(1)
+		}
+		defer botSubscriber.Stop()
+		util.LogMaster("Bot NATS subscriber started - listening for bot events")
+
+		// Schedule NATS subscriber
+		scheduleSubscriber, err := schedulenatssubscriber.NewNATSSubscriber(ctx, schedulenatssubscriber.SubscriberOptions{
+			NATSUrl:                    natsUrl,
+			DBName:                     constants.BOT_SCHEDULER_DB_NAME,
+			CollectionName:             constants.BOT_SCHEDULE_COLLECTION,
+			MaxBotSchedulePerPartition: 100,
+			MaxRetries:                 3,
+			Logger:                     &util.DefaultLogger{},
+		})
+		if err != nil {
+			util.LogMaster("Failed to create schedule NATS subscriber: %v", err)
+			botSubscriber.Stop() // Clean up before exit
+			os.Exit(1)
+		}
+		if err := scheduleSubscriber.Start(ctx); err != nil {
+			util.LogMaster("Failed to start schedule NATS subscriber: %v", err)
+			botSubscriber.Stop() // Clean up before exit
+			os.Exit(1)
+		}
+		defer scheduleSubscriber.Stop()
+		util.LogMaster("Schedule NATS subscriber started - listening for schedule events")
+	}
+
+	// Create controller manager
+	manager, err := controller.NewManager(mongoClient, controller.ManagerConfig{
+		Namespace:              controllerNamespace,
+		ReconcileInterval:      controllerReconcileInterval,
+		MinIOEndpoint:          minioEndpoint,
+		MinIOAccessKey:         minioAccessKey,
+		MinIOSecretKey:         minioSecretKey,
+		MinIOBucket:            minioBucket,
+		MinIOUseSSL:            minioUseSSL,
+		RuntimeImage:           runtimeImage,
+		RuntimeImagePullPolicy: runtimeImagePullPolicy,
+		Logger:                 &util.DefaultLogger{},
+	})
+	if err != nil {
+		util.LogMaster("Failed to create controller manager: %v", err)
+		util.LogMaster("Make sure the controller is running inside a Kubernetes cluster with proper RBAC.")
+		os.Exit(1)
+	}
+
+	// Setup signal handling
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ch
+		util.LogMaster("Received interrupt signal, shutting down controllers...")
+		healthServer.SetReady(false)
+		manager.Stop()
+		cancel()
+	}()
+
+	// Start controllers and wait for readiness
+	readyCh, err := manager.Start(ctx)
+	if err != nil {
+		util.LogMaster("Failed to start controller manager: %v", err)
+		os.Exit(1)
+	}
+
+	// Wait for controllers to be ready, then mark health server as ready
+	go func() {
+		select {
+		case <-readyCh:
+			healthServer.SetReady(true)
+		case <-ctx.Done():
+		}
+	}()
+
+	// Wait for context cancellation (signal handler)
+	<-ctx.Done()
+
+	// Shutdown health server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	healthServer.Stop(shutdownCtx)
+
+	util.LogMaster("Controllers stopped")
+}
+
+// runQueryServer runs the standalone query server
+func runQueryServer() {
+	util.LogMaster("Starting query server...")
+	util.LogMaster("MongoDB: %s", maskCredentialsInURL(mongoUri))
+	util.LogMaster("Port: %d", queryServerPort)
+
+	// Create MongoDB client
+	mongoClient, err := createMongoClient(mongoUri)
+	if err != nil {
+		util.LogMaster("Failed to create MongoDB client: %v", err)
+		os.Exit(1)
+	}
+	defer mongoClient.Disconnect(context.Background())
+
+	// Create DockerRunner for query execution
+	runner, err := dockerrunner.NewDockerRunner(dockerrunner.DockerRunnerOptions{
+		Logger: &util.DefaultLogger{},
+	})
+	if err != nil {
+		util.LogMaster("Failed to create Docker runner: %v", err)
+		os.Exit(1)
+	}
+
+	var resultManager storage.QueryResultManager
+	storageCfg, err := storage.LoadConfigFromEnv()
+	if err != nil {
+		util.LogMaster("Warning: storage config unavailable; scheduled queries will fail: %v", err)
+	} else if minioClient, err := storage.NewMinioClient(storageCfg); err != nil {
+		util.LogMaster("Warning: MinIO unavailable; scheduled queries will fail: %v", err)
+	} else {
+		resultManager = storage.NewQueryResultManager(minioClient, storageCfg, &util.DefaultLogger{})
+	}
+
+	// Create multi-collection bot resolver
+	resolver := dockerrunner.NewMultiBotResolver(mongoClient, runner)
+
+	// Create query handler
+	handler := dockerrunner.NewQueryHandler(dockerrunner.QueryHandlerConfig{
+		Runner:        runner,
+		ResultManager: resultManager,
+		Logger:        &util.DefaultLogger{},
+	})
+
+	// Create and start query server
+	server := dockerrunner.NewQueryServer(dockerrunner.QueryServerConfig{
+		Port:        queryServerPort,
+		Handler:     handler,
+		BotResolver: resolver,
+		Logger:      &util.DefaultLogger{},
+	})
+
+	if err := server.Start(); err != nil {
+		util.LogMaster("Failed to start query server: %v", err)
+		os.Exit(1)
+	}
+
+	util.LogMaster("Query server started on port %d", queryServerPort)
+
+	// Setup signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ch
+		util.LogMaster("Received interrupt signal, shutting down...")
+		cancel()
+	}()
+
+	// Wait for shutdown
+	<-ctx.Done()
+
+	// Graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	server.Stop(shutdownCtx)
+	runner.Close()
+
+	util.LogMaster("Query server stopped")
+}
+
+// Utility functions
+func getEnv(key string, defaultValue string) string {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return defaultValue
+	}
+	return value
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return defaultValue
+	}
+	var result int
+	_, err := fmt.Sscanf(value, "%d", &result)
+	if err != nil {
+		return defaultValue
+	}
+	return result
+}
+
+func createMongoClient(mongoUri string) (*mongo.Client, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mongoClient, err := mongo.Connect(ctx, mongoOptions.Client().ApplyURI(mongoUri))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	}
+
+	// Test the connection
+	err = mongoClient.Ping(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
+	}
+
+	return mongoClient, nil
+}
+
+func runGC() {
+	util.LogMaster("Starting garbage collector...")
+	util.LogMaster("MongoDB: %s", maskCredentialsInURL(mongoUri))
+
+	// Connect to MongoDB
+	mongoClient, err := createMongoClient(mongoUri)
+	if err != nil {
+		util.LogMaster("Failed to connect to MongoDB: %v", err)
+		os.Exit(1)
+	}
+	defer mongoClient.Disconnect(context.Background())
+
+	// Create MinIO client from env
+	cfg, err := storage.LoadConfigFromEnv()
+	if err != nil {
+		util.LogMaster("Failed to load MinIO config: %v", err)
+		os.Exit(1)
+	}
+
+	minioClient, err := storage.NewMinioClient(cfg)
+	if err != nil {
+		util.LogMaster("Failed to create MinIO client: %v", err)
+		os.Exit(1)
+	}
+
+	util.LogMaster("MinIO: %s (logs=%s, state=%s)", cfg.Endpoint, cfg.LogsBucket, cfg.StateBucket)
+
+	collector := gc.NewGarbageCollector(gc.GarbageCollectorOptions{
+		MinIO:       gc.NewMinIOAdapter(minioClient),
+		Store:       gc.NewMongoBotStore(mongoClient),
+		LogsBucket:  cfg.LogsBucket,
+		StateBucket: cfg.StateBucket,
+		Logger:      &util.DefaultLogger{},
+	})
+
+	// Run once
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result, err := collector.Run(ctx)
+	if err != nil {
+		util.LogMaster("GC sweep failed: %v", err)
+		os.Exit(1)
+	}
+	util.LogMaster("GC sweep complete: %d orphaned bot(s), %d objects deleted", result.OrphanedBots, result.DeletedObjects)
+
+	// If no interval, exit after single sweep
+	if gcInterval <= 0 {
+		return
+	}
+
+	// Continuous mode: health server + ticker loop with signal handling
+	healthServer := health.NewServer(8084)
+	healthServer.Start()
+	healthServer.SetReady(true)
+	util.LogMaster("Running continuously every %v (Ctrl+C to stop)", gcInterval)
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+
+	ticker := time.NewTicker(gcInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			result, err := collector.Run(ctx)
+			if err != nil {
+				util.LogMaster("GC sweep failed: %v", err)
+			} else {
+				util.LogMaster("GC sweep: %d orphaned bot(s), %d objects deleted", result.OrphanedBots, result.DeletedObjects)
+			}
+		case <-ch:
+			util.LogMaster("Received shutdown signal, exiting...")
+			healthServer.Stop(context.Background())
+			return
+		}
+	}
+}
+
+// maskCredentialsInURL masks password in a connection URL for safe logging.
+// Example: mongodb://user:secret@host:27017 -> mongodb://user:***@host:27017
+func maskCredentialsInURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// If parsing fails, return a masked placeholder to be safe
+		return "***"
+	}
+
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			username := parsed.User.Username()
+			parsed.User = url.UserPassword(username, "***")
+		}
+	}
+
+	return parsed.String()
+}
