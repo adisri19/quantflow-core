@@ -1,0 +1,131 @@
+import { Injectable } from "@nestjs/common";
+import { RoleRepository } from "@/common/role.repository";
+import { ApiKey } from "./models/api-key.model";
+import { Result, Ok, Failure, errorMessage } from "@/common/result";
+import { eq, and } from "drizzle-orm";
+import { createId } from "@paralleldrive/cuid2";
+import * as crypto from "crypto";
+import pino from "pino";
+
+const logger = pino({ name: "ApiKeyRepository" });
+
+@Injectable()
+export class ApiKeyRepository extends RoleRepository<ApiKey> {
+  protected readonly tableName = "apiKeys" as const;
+
+  async createApiKey(
+    userId: string,
+    name: string,
+  ): Promise<Result<ApiKey, string>> {
+    try {
+      // Generate a secure API key
+      const apiKey = this.generateApiKey();
+
+      const data = {
+        userId,
+        name,
+        keyValue: apiKey,
+        isActive: true,
+      };
+
+      const result = await this.create(data);
+
+      if (!result.success) {
+        return Failure(result.error);
+      }
+
+      // Return with the actual key
+      return Ok({
+        ...result.data,
+        key: apiKey,
+      } as ApiKey);
+    } catch (error: unknown) {
+      return Failure(errorMessage(error));
+    }
+  }
+
+  async findByKey(key: string): Promise<Result<ApiKey, string>> {
+    try {
+      const records = await this.db
+        .select()
+        .from(this.table)
+        .where(
+          and(eq(this.table.keyValue, key), eq(this.table.isActive, true)),
+        );
+
+      if (records.length === 0) {
+        return Failure("API key not found or inactive");
+      }
+
+      const apiKey = records[0];
+
+      return Ok({
+        id: apiKey.id,
+        userId: apiKey.userId,
+        name: apiKey.name,
+        key: apiKey.keyValue,
+        isActive: apiKey.isActive,
+        createdAt: apiKey.createdAt,
+        updatedAt: apiKey.updatedAt,
+        lastUsedAt: apiKey.lastUsedAt,
+      } as ApiKey);
+    } catch (error: unknown) {
+      return Failure(errorMessage(error));
+    }
+  }
+
+  async updateLastUsed(keyId: string): Promise<Result<void, string>> {
+    try {
+      await this.db
+        .update(this.table)
+        .set({ lastUsedAt: new Date() })
+        .where(eq(this.table.id, keyId));
+
+      return Ok(null);
+    } catch (error: unknown) {
+      return Failure(errorMessage(error));
+    }
+  }
+
+  async deleteApiKey(
+    userId: string,
+    id: string,
+  ): Promise<Result<void, string>> {
+    try {
+      // First check if the API key exists and belongs to the user
+      const existingKey = await this.findOne(userId, id);
+      if (!existingKey.success) {
+        return Failure("API key not found");
+      }
+
+      await this.db
+        .delete(this.table)
+        .where(and(eq(this.table.id, id), eq(this.table.userId, userId)));
+
+      return Ok(null);
+    } catch (error: unknown) {
+      logger.error({ err: error }, "Error deleting API key");
+      return Failure(errorMessage(error));
+    }
+  }
+
+  // Override transformSnapshotToData to show full API key info
+  protected transformSnapshotToData<U>(record: Record<string, unknown>): U {
+    return {
+      id: record.id,
+      userId: record.userId,
+      name: record.name,
+      key: record.keyValue,
+      isActive: record.isActive,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      lastUsedAt: record.lastUsedAt,
+    } as U;
+  }
+
+  private generateApiKey(): string {
+    const prefix = "quantflow_";
+    const randomBytes = crypto.randomBytes(32).toString("hex");
+    return `${prefix}${randomBytes}`;
+  }
+}

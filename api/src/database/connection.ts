@@ -1,0 +1,123 @@
+import { drizzle } from "drizzle-orm/postgres-js";
+import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
+import postgres from "postgres";
+import Database from "better-sqlite3";
+import * as net from "net";
+import { loadConfig, DatabaseConfig } from "../config/database.config";
+import * as usersSchema from "./schema/users";
+import * as customBotsSchema from "./schema/custom-bots";
+import * as botsSchema from "./schema/bots";
+// Logs are stored in external storage (MinIO/S3), not in database
+
+// Combined schema for PostgreSQL
+export const pgSchema = {
+  ...usersSchema,
+  ...customBotsSchema,
+  ...botsSchema,
+};
+
+// Combined schema for SQLite
+export const sqliteSchema = {
+  usersTable: usersSchema.usersTableSqlite,
+  adminMutationLocksTable: usersSchema.adminMutationLocksTableSqlite,
+  apiKeysTable: usersSchema.apiKeysTableSqlite,
+  customBotsTable: customBotsSchema.customBotsTableSqlite,
+  botsTable: botsSchema.botsTableSqlite,
+};
+
+// Table registry for clean access
+export interface TableRegistry {
+  users: typeof usersSchema.usersTable | typeof usersSchema.usersTableSqlite;
+  adminMutationLocks:
+    | typeof usersSchema.adminMutationLocksTable
+    | typeof usersSchema.adminMutationLocksTableSqlite;
+  apiKeys:
+    | typeof usersSchema.apiKeysTable
+    | typeof usersSchema.apiKeysTableSqlite;
+  customBots:
+    | typeof customBotsSchema.customBotsTable
+    | typeof customBotsSchema.customBotsTableSqlite;
+  bots: typeof botsSchema.botsTable | typeof botsSchema.botsTableSqlite;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- dual-DB (PG/SQLite) runtime
+// selection: drizzle's PG and SQLite APIs have incompatible method signatures,
+// so the instance must remain `any` to support dynamic dispatch at runtime.
+let dbInstance: any = null;
+let configCache: DatabaseConfig | null = null;
+let tablesCache: TableRegistry | null = null;
+
+export function getDatabase() {
+  if (dbInstance) {
+    return dbInstance;
+  }
+
+  const config = loadConfig();
+  configCache = config;
+
+  if (config.type === "sqlite") {
+    const sqlite = new Database(config.url);
+    dbInstance = drizzleSqlite(sqlite, { schema: sqliteSchema });
+
+    tablesCache = {
+      users: usersSchema.usersTableSqlite,
+      adminMutationLocks: usersSchema.adminMutationLocksTableSqlite,
+      apiKeys: usersSchema.apiKeysTableSqlite,
+      customBots: customBotsSchema.customBotsTableSqlite,
+      bots: botsSchema.botsTableSqlite,
+    };
+  } else {
+    // Disable Node 20's Happy Eyeballs (RFC 8305) which splits connect_timeout
+    // across all DNS results (~250ms each).
+    if (config.autoSelectFamily === false) {
+      net.setDefaultAutoSelectFamily(false);
+    }
+
+    const client = postgres(config.url, {
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      password: config.password,
+      database: config.database,
+      max: config.pool.max,
+      idle_timeout: config.pool.idleTimeout,
+      connect_timeout: config.pool.connectTimeout,
+      max_lifetime: config.pool.maxLifetime,
+      types: {
+        // Fix JSONB double-encoding: Drizzle already calls JSON.stringify() in
+        // mapToDriverValue, so we must stop postgres.js from stringifying again.
+        // See https://github.com/drizzle-team/drizzle-orm/issues/5139
+        json: {
+          to: 114,
+          from: [114, 3802],
+          serialize: (x: any) => x,
+          parse: (x: string) => JSON.parse(x),
+        },
+      },
+    });
+    dbInstance = drizzle(client, { schema: pgSchema });
+
+    tablesCache = {
+      users: usersSchema.usersTable,
+      adminMutationLocks: usersSchema.adminMutationLocksTable,
+      apiKeys: usersSchema.apiKeysTable,
+      customBots: customBotsSchema.customBotsTable,
+      bots: botsSchema.botsTable,
+    };
+  }
+
+  return dbInstance;
+}
+
+export function getDatabaseConfig(): DatabaseConfig {
+  return configCache || loadConfig();
+}
+
+export function getTables(): TableRegistry {
+  if (!tablesCache) {
+    getDatabase(); // Initialize tables cache
+  }
+  return tablesCache!;
+}
+
+export { pgSchema as schema };
