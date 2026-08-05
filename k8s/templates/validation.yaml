@@ -1,0 +1,6 @@
+{{/*
+Validate external service configuration at render time.
+When an infrastructure service is disabled, its external connection details must be set.
+This template produces no Kubernetes resources — it only runs fail checks.
+*/}}
+{{ include "quantflow.validateExternalServices" . }}

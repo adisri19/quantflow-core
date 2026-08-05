@@ -1,0 +1,324 @@
+# Default values for quantflow
+# This configuration works out-of-the-box with minikube using local images
+
+# Global settings
+global:
+  # Image pull policy for local development (use cached images)
+  imagePullPolicy: Never
+  # For production with GHCR images, use: Always
+
+  # Storage class for persistent volumes (leave empty for default)
+  storageClass: ""
+
+  # Provide an existing Secret name to skip auto-generation of the chart Secret.
+  # The Secret must contain these keys:
+  #   postgresql-password, mongodb-root-password, minio-access-key, minio-secret-key,
+  #   database-url, mongo-url, jwt-secret
+  # Works with Sealed Secrets, External Secrets Operator, etc.
+  existingSecret: ""
+
+# Infrastructure Services
+# Set enabled: false to use external services in production
+
+postgresql:
+  enabled: true
+  image: postgres:15-alpine
+  port: 5432
+  database: quantflow_oss
+  username: quantflow
+  password: quantflow_password
+  sslmode: disable
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  external:
+    host: ""
+    port: 5432
+    database: quantflow_oss
+    username: ""
+    password: ""
+    sslmode: require
+    connectionString: ""  # overrides individual fields if set
+
+mongodb:
+  enabled: true
+  image: mongo:7-jammy
+  port: 27017
+  rootUsername: root
+  rootPassword: quantflow_mongo_password
+  database: bot_runner
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  external:
+    host: ""
+    port: 27017
+    username: ""
+    password: ""
+    database: bot_runner
+    authSource: admin
+    options: ""
+    connectionString: ""  # overrides individual fields if set
+
+nats:
+  enabled: true
+  image: nats:2.10-alpine
+  port: 4222
+  monitoringPort: 8222
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 200m
+  external:
+    host: ""
+    port: 4222
+    url: ""  # overrides host:port if set
+
+minio:
+  enabled: true
+  image: minio/minio:latest
+  port: 9000
+  consolePort: 9001
+  accessKey: quantflowadmin
+  secretKey: quantflowpassword
+  persistence:
+    enabled: true
+    size: 20Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  external:
+    endpoint: ""
+    port: 443
+    useSSL: true
+    accessKey: ""
+    secretKey: ""
+    region: ""
+
+# Application Services
+
+quantflowApi:
+  enabled: true
+  replicas: 1
+  # Local image (default)
+  image:
+    repository: quantflow-api
+    # tag defaults to Chart appVersion; override for local dev:
+    # tag: latest
+  # GHCR image (uncomment for production)
+  # image:
+  #   repository: ghcr.io/quantflow-io/quantflow/api
+  port: 3000
+  env:
+    # Application configuration
+    DATABASE_TYPE: "postgres"
+    MINIO_EXTERNAL_ENDPOINT: "minio.quantflow.local:30002"
+    STORAGE_PATH: "/app/uploads/custom-bots"
+    CUSTOM_BOTS_BUCKET: "custom-bots"
+    LOG_BUCKET: "bot-logs"
+    BACKTEST_BUCKET: "backtests"
+    NODE_ENV: "development"
+    PORT: "3000"
+    API_BASE_URL: "http://quantflow-api:3000"
+    FRONTEND_URL: "http://quantflow.local:30001"
+    JWT_SECRET: "your-jwt-secret-key"
+    JWT_EXPIRES_IN: "7d"
+    # Required root admin email. Set QUANTFLOW_ADMIN_PASSWORD through extraEnv with
+    # a Secret reference; the API fails startup when either value is missing.
+    # QUANTFLOW_ADMIN_EMAIL: "admin@example.com"
+    RUNTIME_QUERY_URL: "http://quantflow-bot-controller:9477"
+    # Database pool lifecycle (prevents stale connections)
+    DB_POOL_MAX: "10"
+    DB_POOL_IDLE_TIMEOUT: "20"
+    DB_POOL_CONNECT_TIMEOUT: "10"
+    DB_POOL_MAX_LIFETIME: "1800"
+    DB_AUTO_SELECT_FAMILY: "true"
+  # Full Kubernetes EnvVar entries. Use this for secretKeyRef/configMapKeyRef.
+  extraEnv: []
+  # Example:
+  # - name: QUANTFLOW_ADMIN_PASSWORD
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: quantflow-root-admin
+  #       key: password
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 200m
+    limits:
+      memory: 1Gi
+      cpu: 1000m
+
+quantflowFrontend:
+  enabled: true
+  replicas: 1
+  # Local image (default)
+  image:
+    repository: quantflow-frontend
+    # tag defaults to Chart appVersion; override for local dev:
+    # tag: latest
+  # GHCR image (uncomment for production)
+  # image:
+  #   repository: ghcr.io/quantflow-io/quantflow/frontend
+  port: 3000
+  env:
+    # Frontend configuration (using NodePort URLs)
+    # Note: NEXT_PUBLIC_API_URL and NEXT_PUBLIC_DOCS_URL are set via build args in Makefile
+    # Note: BOT_API_URL is dynamically constructed in the template
+    NEXT_PUBLIC_APP_NAME: "quantflow"
+    NEXT_PUBLIC_APP_VERSION: "1.0.0"
+    NEXT_BASE_URL: "http://quantflow.local:30001"
+    NODE_ENV: "development"
+    JWT_SECRET: "your-jwt-secret-key"
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+quantflowDocs:
+  enabled: true
+  replicas: 1
+  # Local image (default)
+  image:
+    repository: quantflow-docs
+    # tag defaults to Chart appVersion; override for local dev:
+    # tag: latest
+  # GHCR image (uncomment for production)
+  # image:
+  #   repository: ghcr.io/quantflow-io/quantflow/docs
+  port: 8080  # DHI nginx serves on unprivileged port 8080
+  env:
+    # Documentation configuration
+    NEXT_PUBLIC_APP_NAME: "quantflow"
+    NEXT_PUBLIC_APP_VERSION: "1.0.0"
+    NODE_ENV: "development"
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 200m
+
+# Kubernetes-Native Bot Controller
+# Manages bot Pods and CronJobs directly - no Docker-in-Docker needed
+botController:
+  enabled: true
+  replicas: 1
+  image:
+    repository: runtime
+    # tag defaults to Chart appVersion; override for local dev:
+    # tag: latest
+  # runtimeImage defaults to repository:appVersion; override for local dev:
+  # runtimeImage: "runtime:latest"
+  # Image pull policy for runtime image (Never for local minikube, Always for production)
+  runtimeImagePullPolicy: "Never"
+  # How often to reconcile state with MongoDB
+  reconcileInterval: "30s"
+  # Environment variables for the controller
+  # Each entry supports standard K8s env syntax: value, valueFrom, secretKeyRef, etc.
+  # For production, use secretKeyRef to reference Sealed Secrets
+  # Additional environment variables (supports standard K8s env syntax)
+  # For production, use secretKeyRef to reference Sealed Secrets:
+  # env:
+  #   - name: MONGO_URI
+  #     valueFrom:
+  #       secretKeyRef:
+  #         name: quantflow-secrets
+  #         key: MONGO_URI
+  env: []
+  # MinIO configuration for bot code storage
+  minio:
+    bucket: "custom-bots"
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+# Service configuration
+service:
+  type: ClusterIP
+  # For production clusters, use ingress for external access
+
+# External services configuration (NodePort with fixed ports)
+externalServices:
+  # Enable NodePort services for external access
+  # Uses fixed ports for predictable .local domain mapping
+  enabled: true
+  nodePort:
+    frontend: 30001  # quantflow.local:30001
+    api: 30000       # api.quantflow.local:30000
+    minio: 30002     # minio.quantflow.local:30002
+    docs: 30004      # docs.quantflow.local:30004
+
+# Minikube configuration  
+minikube:
+  # Enable minikube-specific optimizations
+  enabled: true
+
+# Ingress configuration (disabled - using NodePort instead)
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: quantflow.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+    - host: api.quantflow.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: api
+    - host: docs.quantflow.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: docs
+  tls: []
+  #  - secretName: quantflow-tls
+  #    hosts:
+  #      - quantflow.example.com
+  #      - api.quantflow.example.com
+  #      - docs.quantflow.example.com
+
+# Garbage Collector - cleans up orphaned bot artifacts from MinIO
+gc:
+  enabled: true
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  image:
+    repository: ghcr.io/quantflow-io/quantflow/runtime
+    tag: ""  # Defaults to Chart.AppVersion
+    pullPolicy: IfNotPresent

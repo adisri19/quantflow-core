@@ -1,0 +1,104 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "quantflow.fullname" . }}-frontend
+  labels:
+    {{- include "quantflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.quantflowFrontend.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: 30001
+      {{- end }}
+  selector:
+    {{- include "quantflow.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "quantflow.fullname" . }}-frontend
+  labels:
+    {{- include "quantflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.quantflowFrontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "quantflow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      annotations:
+        checksum/chart-version: "{{ .Chart.Version }}"
+      labels:
+        {{- include "quantflow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+    spec:
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: {{ .Values.quantflowFrontend.image.repository }}:{{ .Values.quantflowFrontend.image.tag | default .Chart.AppVersion }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.quantflowFrontend.port }}
+              protocol: TCP
+          env:
+            # Dynamically constructed service URLs
+            - name: BOT_API_URL
+              value: "http://{{ include "quantflow.fullname" . }}-api:{{ .Values.quantflowApi.port }}"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "quantflow.secretName" . }}
+                  key: jwt-secret
+            {{- range $key, $value := .Values.quantflowFrontend.env }}
+            {{- if and (ne $key "BOT_API_URL") (ne $key "JWT_SECRET") }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+          
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.quantflowFrontend.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

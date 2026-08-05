@@ -1,0 +1,86 @@
+# AWS production configuration
+# Uses RDS (PostgreSQL), DocumentDB (MongoDB-compatible), S3-compatible storage, and managed NATS.
+
+global:
+  imagePullPolicy: Always
+
+postgresql:
+  enabled: false
+  external:
+    host: "quantflow-db.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
+    port: 5432
+    database: quantflow_oss
+    username: quantflowadmin
+    password: "CHANGEME"
+    sslmode: require
+
+mongodb:
+  enabled: false
+  external:
+    host: "quantflow-docdb.cluster-xxxxxxxxxxxx.us-east-1.docdb.amazonaws.com"
+    port: 27017
+    username: quantflowadmin
+    password: "CHANGEME"
+    database: bot_runner
+    authSource: admin
+    options: "tls=true&tlsCAFile=/etc/ssl/rds-combined-ca-bundle.pem&retryWrites=false"
+
+nats:
+  enabled: false
+  external:
+    host: "nats.internal.example.com"
+    port: 4222
+
+minio:
+  enabled: false
+  external:
+    endpoint: "s3.amazonaws.com"
+    port: 443
+    useSSL: true
+    accessKey: "CHANGEME"
+    secretKey: "CHANGEME"
+    region: "us-east-1"
+
+quantflowApi:
+  replicas: 2
+  image:
+    repository: ghcr.io/quantflow-io/quantflow/api
+  env:
+    DATABASE_TYPE: "postgres"
+    MINIO_EXTERNAL_ENDPOINT: "quantflow-assets.s3.amazonaws.com"
+    STORAGE_PATH: "/app/uploads/custom-bots"
+    CUSTOM_BOTS_BUCKET: "quantflow-custom-bots"
+    LOG_BUCKET: "quantflow-bot-logs"
+    BACKTEST_BUCKET: "quantflow-backtests"
+    NODE_ENV: "production"
+    PORT: "3000"
+    API_BASE_URL: "https://api.quantflow.io"
+    FRONTEND_URL: "https://app.quantflow.io"
+    JWT_SECRET: "CHANGEME"
+    JWT_EXPIRES_IN: "7d"
+    RUNTIME_QUERY_URL: "http://quantflow-bot-controller:9477"
+
+quantflowFrontend:
+  replicas: 2
+  image:
+    repository: ghcr.io/quantflow-io/quantflow/frontend
+  env:
+    NEXT_PUBLIC_APP_NAME: "quantflow"
+    NEXT_PUBLIC_APP_VERSION: "1.0.0"
+    NEXT_BASE_URL: "https://app.quantflow.io"
+    NODE_ENV: "production"
+    JWT_SECRET: "CHANGEME"
+
+botController:
+  image:
+    repository: ghcr.io/quantflow-io/quantflow/runtime
+  runtimeImagePullPolicy: "Always"
+
+minikube:
+  enabled: false
+
+externalServices:
+  enabled: false
+
+ingress:
+  enabled: true

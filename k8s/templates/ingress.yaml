@@ -1,0 +1,52 @@
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "quantflow.fullname" . }}-ingress
+  labels:
+    {{- include "quantflow.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "quantflow.fullname" $ }}-{{ .service }}
+                port:
+                  {{- if eq .service "frontend" }}
+                  number: {{ $.Values.quantflowFrontend.port }}
+                  {{- else if eq .service "api" }}
+                  number: {{ $.Values.quantflowApi.port }}
+                  {{- else if eq .service "minio" }}
+                  number: {{ $.Values.minio.port }}
+                  {{- else if eq .service "docs" }}
+                  number: {{ $.Values.quantflowDocs.port }}
+                  {{- else }}
+                  number: 80
+                  {{- end }}
+          {{- end }}
+    {{- end }}
+{{- end }}

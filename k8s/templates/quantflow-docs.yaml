@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "quantflow.fullname" . }}-docs
+  labels:
+    {{- include "quantflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: docs
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.quantflowDocs.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: 30004
+      {{- end }}
+  selector:
+    {{- include "quantflow.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: docs
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "quantflow.fullname" . }}-docs
+  labels:
+    {{- include "quantflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: docs
+spec:
+  replicas: {{ .Values.quantflowDocs.replicas }}
+  selector:
+    matchLabels:
+      {{- include "quantflow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: docs
+  template:
+    metadata:
+      annotations:
+        checksum/chart-version: "{{ .Chart.Version }}"
+      labels:
+        {{- include "quantflow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: docs
+    spec:
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: docs
+          image: {{ .Values.quantflowDocs.image.repository }}:{{ .Values.quantflowDocs.image.tag | default .Chart.AppVersion }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.quantflowDocs.port }}
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.quantflowDocs.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.quantflowDocs.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
