@@ -1,0 +1,46 @@
+# AI context & planning artifacts (local-only)
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+**/CLAUDE.md
+**/PRPs/
+**/stories/
+
+.claude/
+**/*/.claude
+.claude/agents/
+.agents/
+.notes/
+PR_MESSAGE.md
+
+# Example bots - dependencies
+example-bots/*/node_modules/
+example-bots/*/frontend/node_modules/
+example-bots/*/vendor/
+
+# Example bots - build outputs
+example-bots/*/frontend/dist/
+example-bots/*/build/
+example-bots/*/target/
+example-bots/*/bin/
+example-bots/*/obj/
+example-bots/*/dist-newstyle/
+example-bots/*/project/target/
+example-bots/*/project/project/target/
+example-bots/*/.scala-build/
+example-bots/**/main.js
+
+# Example bots - lock files and misc
+example-bots/*/frontend/package-lock.json
+example-bots/*/frontend/yarn.lock
+# NOTE: .npmrc tracked on purpose — points @quantflow-io scope to GitHub Packages (no secrets)
+# example-bots/*/frontend/.npmrc
+example-bots/*/*.lock
+example-bots/*/package-lock.json
+
+# SDK
+sdk/react/.npmrc
+sdk/react/node_modules/
+sdk/react/dist/
+_debug_test_bots/
+_stress_test_bots/
